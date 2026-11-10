@@ -33,7 +33,7 @@
 
 Client ID、Client Secret、主人信息（钉钉 staff id、显示名、配对时间）和最近处理过的消息 id，都作为连接器的加密密文保存在 hub 的数据库里，不会出现在扩展目录、日志或状态中。退出登录会全部删除并断开连接。不记录消息内容和 token。
 
-唯一的网络授权是 `*.dingtalk.com`：开放平台（`api.dingtalk.com`）、它分配的 Stream 地址、会话 webhook 和下载地址。开放平台和 webhook 必须是 HTTPS，回复只发往钉钉的会话 webhook。
+网络授权有两项：`*.dingtalk.com`（开放平台 `api.dingtalk.com`、它分配的 Stream 地址如 `wss-open-connection.dingtalk.com`，以及 `oapi.dingtalk.com` 上的会话 webhook）和 `*.aliyuncs.com`：钉钉把消息里的图片、文件和语音存在阿里云 OSS 上，下载地址也在那里。钉钉给的这类地址是 `http://`，扩展会改用 HTTPS 下载，并拒绝其他域名的下载地址。开放平台和 webhook 必须是 HTTPS，回复只发往钉钉的会话 webhook。
 
 ## 开发
 

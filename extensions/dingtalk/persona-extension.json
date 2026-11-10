@@ -23,5 +23,5 @@
       "capabilities": {"images_in": true, "files_in": true, "voice_in": true, "format": "markdown", "max_text": 4000, "asks": "text", "push": true}
     }]
   },
-  "permissions": {"network": ["*.dingtalk.com"]}
+  "permissions": {"network": ["*.dingtalk.com", "*.aliyuncs.com"]}
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"log"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -212,7 +214,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 				if name == "" {
 					name = "file"
 				}
-				out.Files = append(out.Files, wire.ChannelBlob{Name: name, Mime: http.DetectContentType(data), Data: base64.StdEncoding.EncodeToString(data)})
+				out.Files = append(out.Files, wire.ChannelBlob{Name: name, Mime: fileMime(name, data), Data: base64.StdEncoding.EncodeToString(data)})
 			}
 		case api.KindVideo:
 			out.Unsupported = append(out.Unsupported, "一段视频") // i18n-ignore: what the assistant reads
@@ -230,6 +232,17 @@ func download(ctx context.Context, c *api.Client, code string, most int64) ([]by
 		return nil, errors.New("no download code")
 	}
 	return c.Download(ctx, code, most)
+}
+
+// fileMime is a file's type: from its bytes, else from its name's extension (an old .doc reads as plain bytes).
+func fileMime(name string, data []byte) string {
+	if m := http.DetectContentType(data); m != "application/octet-stream" {
+		return m
+	}
+	if m := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); m != "" {
+		return m
+	}
+	return "application/octet-stream"
 }
 
 func fileLabel(name string) string {

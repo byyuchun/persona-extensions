@@ -33,7 +33,7 @@ Only the owner's messages reach Persona. Before pairing, the robot tells others 
 
 The Client ID, Client Secret, the owner (DingTalk staff id, display name, pairing time) and the ids of recently handled messages are kept as the connector's encrypted secret in the hub's database. They are never stored in the extension directory, logs or status. Signing out deletes all of it and closes the connection. Message contents and tokens are not logged.
 
-The only network grant is `*.dingtalk.com`: the open platform (`api.dingtalk.com`), the Stream endpoint it hands out, session webhooks and download hosts. The open platform and webhooks must be HTTPS, and replies go only to DingTalk session webhooks.
+The network grants are `*.dingtalk.com` (the open platform `api.dingtalk.com`, the Stream endpoint it hands out, such as `wss-open-connection.dingtalk.com`, and session webhooks on `oapi.dingtalk.com`) and `*.aliyuncs.com`: DingTalk keeps the pictures, files and voice clips of messages in Alibaba Cloud OSS buckets and gives their download addresses there. It gives those addresses as `http://`; the extension fetches them over HTTPS instead, and refuses download addresses on any other host. The open platform and webhooks must be HTTPS, and replies go only to DingTalk session webhooks.
 
 ## Development
 

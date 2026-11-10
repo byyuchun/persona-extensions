@@ -40,15 +40,17 @@ type Fake struct {
 	// Invalid and Held are the staff ids the robot cannot reach and those DingTalk holds back (flow control).
 	Invalid, Held map[string]bool
 	// Fail answers every send with this HTTP status (0: none).
-	Fail    int
-	tokens  int
-	opens   int
-	sent    []Sent
-	replies []string
-	acks    []map[string]any
-	conn    *websocket.Conn
-	connCtx context.Context
-	up      chan struct{}
+	Fail int
+	// PlainDownloads gives download addresses as http (as DingTalk does for its OSS buckets).
+	PlainDownloads bool
+	tokens         int
+	opens          int
+	sent           []Sent
+	replies        []string
+	acks           []map[string]any
+	conn           *websocket.Conn
+	connCtx        context.Context
+	up             chan struct{}
 }
 
 // New starts a fake that closes with the test.
@@ -193,7 +195,13 @@ func (f *Fake) download(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "InvalidAuthentication"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"downloadUrl": "https://" + r.Host + "/files/" + in.DownloadCode})
+	f.mu.Lock()
+	scheme := "https"
+	if f.PlainDownloads {
+		scheme = "http"
+	}
+	f.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"downloadUrl": scheme + "://" + r.Host + "/files/" + in.DownloadCode})
 }
 
 func (f *Fake) file(w http.ResponseWriter, r *http.Request) {

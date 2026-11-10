@@ -402,6 +402,18 @@ func TestChunkAndTitle(t *testing.T) {
 	}
 }
 
+func TestFileMimeFallsBackToTheExtension(t *testing.T) {
+	if got := fileMime("notes.pdf", []byte("%PDF-1.4")); got != "application/pdf" {
+		t.Errorf("from the bytes: %s", got)
+	}
+	if got := fileMime("form.doc", []byte{0xd0, 0xcf, 0x11, 0xe0, 0, 1, 2}); got == "application/octet-stream" || got == "" {
+		t.Errorf("an old Word file by its extension: %s", got)
+	}
+	if got := fileMime("blob", []byte{0, 1, 2}); got != "application/octet-stream" {
+		t.Errorf("nothing to go by: %s", got)
+	}
+}
+
 func TestLocalesHaveTheSameKeys(t *testing.T) {
 	want := slices.Sorted(maps.Keys(catalogs[langEn]))
 	for _, l := range []string{langZhHans, langJa} {

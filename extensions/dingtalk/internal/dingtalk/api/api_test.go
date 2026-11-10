@@ -82,6 +82,11 @@ func TestDownloadLimitsSize(t *testing.T) {
 	if _, err := c.Download(context.Background(), "code-1", 4); !errors.Is(err, api.ErrTooLarge) {
 		t.Errorf("an oversized download: %v", err)
 	}
+	// DingTalk gives its OSS addresses as http: fetched over https (the fake serves TLS only)
+	f.PlainDownloads = true
+	if data, err := c.Download(context.Background(), "code-1", 1<<20); err != nil || string(data) != "synthetic picture bytes" {
+		t.Fatalf("an http download address: %q, %v", data, err)
+	}
 }
 
 func TestReplyOnlyToDingTalkWebhooks(t *testing.T) {

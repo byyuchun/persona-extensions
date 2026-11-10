@@ -250,9 +250,9 @@ func (c *Client) Download(ctx context.Context, downloadCode string, most int64) 
 		map[string]string{"downloadCode": downloadCode, "robotCode": c.RobotCode()}, &out); err != nil {
 		return nil, err
 	}
-	u, err := url.Parse(out.DownloadURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return nil, errors.New("DingTalk gave no https download address")
+	u, err := c.downloadURL(out.DownloadURL)
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
@@ -279,6 +279,22 @@ func (c *Client) Download(ctx context.Context, downloadCode string, most int64) 
 		return nil, ErrTooLarge
 	}
 	return data, nil
+}
+
+// downloadURL checks where DingTalk says the bytes are: its own hosts or Alibaba Cloud OSS (where it keeps message
+// files; seen in practice as http://<bucket>.oss-cn-<region>.aliyuncs.com/…). An http address is fetched over https:
+// OSS serves the same object on both, and the bytes are someone's private message.
+func (c *Client) downloadURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Scheme != "https" && u.Scheme != "http" {
+		return nil, errors.New("DingTalk gave no download address")
+	}
+	host := u.Hostname()
+	if !c.webhookHost(host) && host != "aliyuncs.com" && !strings.HasSuffix(host, ".aliyuncs.com") {
+		return nil, fmt.Errorf("DingTalk's download address is on an unexpected host %q", host)
+	}
+	u.Scheme = "https"
+	return u, nil
 }
 
 // ErrTooLarge: what a download brings is larger than allowed.

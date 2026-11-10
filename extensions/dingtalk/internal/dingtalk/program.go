@@ -24,8 +24,9 @@ func Item() wire.ConnectorItem {
 // MaxText is how many characters one message to DingTalk carries: the hub cuts longer answers into pieces this long.
 const MaxText = 4000
 
-// Network is where it goes: the open platform, the Stream endpoint and DingTalk's download hosts.
-var Network = []string{"*.dingtalk.com"}
+// Network is where it goes: the open platform, the Stream endpoint and session webhooks (*.dingtalk.com), and the
+// Alibaba Cloud OSS buckets DingTalk keeps message pictures, files and voice clips in (*.aliyuncs.com).
+var Network = []string{"*.dingtalk.com", "*.aliyuncs.com"}
 
 // Channel is the channel it contributes (docs/extensions/channels.md in Persona): text, pictures, files and voice
 // (DingTalk's own transcript) come in, Markdown goes out, what agents ask is answered in text.
