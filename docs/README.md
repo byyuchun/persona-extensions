@@ -20,6 +20,7 @@
 - [Discord](extensions/discord.md): your own bot as a read-only source: setting it up, what goes into the knowledge base and how nothing is skipped, the assistant tools, status, network and the sandbox.
 - [X](extensions/x.md): two optional ways in: the official X API with your own developer app (mentions in the inbox, a daily-budgeted digest of your timeline or lists, cost and X's terms), or the `grok` CLI on the hub signed in with a SuperGrok or X Premium+ subscription (searches chosen accounts and topics, no X keys); read-only assistant tools and retention.
 - [Bypass auto-allow (Claude Code)](extensions/agent-bypass-allow.md): auto-allow Claude Code's remaining Bash, read-only and subagent prompts in bypassPermissions sessions on chosen computers; deletion and overwriting ask unless inside temporary or work directories (or a setting allows them all); force pushes, permission changes and your own ask/deny rules still ask; audit log and limits.
+- [DingTalk](../extensions/dingtalk/README.md): chat with Persona from DingTalk through your own internal app's robot over Stream mode (no public address): credentials and pairing, owner-only forwarding, pictures, files and voice transcripts in, Markdown out; a robot sees only what is sent to it.
 - [mnemo](../extensions/mnemo/README.md): let the Claude assistant search past coding-agent sessions through mnemo's MCP server, when mnemo is installed on its computer; read-only tools only.
 
 ## Developing and maintaining extensions
