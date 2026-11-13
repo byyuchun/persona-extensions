@@ -1,0 +1,57 @@
+{
+  "manifest_version": 1,
+  "id": "openalex",
+  "name": "OpenAlex 研究检索",
+  "version": "0.1.2",
+  "icon": "assets/icon.png",
+  "description": "按主题、标题或 DOI 搜索 OpenAlex 论文，查看年份、引用量、开放获取状态和原始链接。内容由 hub 通过公开 API 获取，无需账号。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/extensions/openalex/README.md",
+  "tags": [
+    "研究",
+    "论文",
+    "OpenAlex"
+  ],
+  "engines": {
+    "plugin_protocol": 1
+  },
+  "runtime": {
+    "mode": "deno",
+    "source": {
+      "entry": "src/index.ts",
+      "bundle": "build/openalex.mjs",
+      "sha256": "0e9aaead736a33c1d62522ff81ff04ac05a6ad4ad11087d48281e4cb0f4dd539"
+    }
+  },
+  "contributes": {
+    "connectors": [
+      {
+        "id": "openalex",
+        "name": "OpenAlex",
+        "capabilities": [
+          "status",
+          "tools"
+        ],
+        "hosts": [
+          "api.openalex.org"
+        ],
+        "agent_tools": [
+          "openalex_*"
+        ]
+      }
+    ],
+    "ui": [
+      {
+        "id": "research",
+        "title": "研究检索",
+        "placement": "nav_page",
+        "icon": "doc"
+      }
+    ]
+  },
+  "permissions": {
+    "network": [
+      "api.openalex.org"
+    ]
+  }
+}

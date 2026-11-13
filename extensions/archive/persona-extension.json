@@ -1,0 +1,89 @@
+{
+  "manifest_version": 1,
+  "id": "archive",
+  "name": "Internet Archive 馆藏检索",
+  "version": "0.1.1",
+  "icon": "assets/icon.png",
+  "description": "按标题、作者或主题搜索 Internet Archive 馆藏，查看类型、年份、下载量和原始条目。内容由 hub 通过公开 API 获取，无需账号。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/extensions/archive/README.md",
+  "tags": [
+    "Internet Archive",
+    "馆藏",
+    "检索"
+  ],
+  "engines": {
+    "plugin_protocol": 1
+  },
+  "runtime": {
+    "mode": "deno",
+    "source": {
+      "entry": "src/index.ts",
+      "bundle": "build/archive.mjs",
+      "sha256": "b3983ac8dd05682a91e1ff51cc5be10c355f8e9738b002620625bc783ac3dadf"
+    }
+  },
+  "contributes": {
+    "connectors": [
+      {
+        "id": "archive",
+        "name": "Internet Archive",
+        "capabilities": [
+          "status",
+          "tools"
+        ],
+        "hosts": [
+          "archive.org"
+        ],
+        "agent_tools": [
+          "archive_*"
+        ]
+      }
+    ],
+    "ui": [
+      {
+        "id": "collections",
+        "title": "馆藏检索",
+        "placement": "nav_page",
+        "icon": "doc"
+      }
+    ]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "media": {
+        "type": "string",
+        "title": "馆藏类型",
+        "default": "all",
+        "oneOf": [
+          {
+            "const": "all",
+            "title": "全部类型"
+          },
+          {
+            "const": "texts",
+            "title": "文本"
+          },
+          {
+            "const": "audio",
+            "title": "音频"
+          },
+          {
+            "const": "movies",
+            "title": "视频"
+          },
+          {
+            "const": "image",
+            "title": "图片"
+          }
+        ]
+      }
+    }
+  },
+  "permissions": {
+    "network": [
+      "archive.org"
+    ]
+  }
+}

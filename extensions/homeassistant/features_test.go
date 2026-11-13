@@ -1065,9 +1065,13 @@ func TestPageDevices(t *testing.T) {
 
 	v, _ := a.render(context.Background(), req(nil, "", nil))
 	got := check(t, v)
-	contains(t, got, "row 客厅|客厅灯、吸顶灯、插座 等 4 个开着 · 27.5°|", "[4 开着 positive]")
-	if strings.Contains(got, "辅光") || strings.Contains(got, "通电默认") {
-		t.Errorf("a device's settings counted as on:\n%s", got)
+	contains(t, got, "stat 开着=4|2 灯 · 1 开关 · 1 空调|positive", "row 吸顶灯|客厅|||| [开 positive] →do:light.ceiling|turn_off",
+		"row 插座|客厅|||| [开 positive] →do:switch.living_plug|turn_off", "row 客厅|2 灯、1 开关、1 空调开着|27.5°||| [1 离线 caution]",
+		"row 卧室|2 个设备|湿度 60%|")
+	for _, no := range []string{"辅光", "通电默认", "藏起来的开关", "地图", "勿扰"} {
+		if strings.Contains(got, no) {
+			t.Errorf("%s on the overview:\n%s", no, got)
+		}
 	}
 
 	res, st := act(t, a, pageState{}, "area:living", nil)
@@ -1088,12 +1092,16 @@ func TestPageDevices(t *testing.T) {
 	// the light opened: its device's settings folded into one row, unfolded on a tap
 	res, st = act(t, a, st, "open:light.ceiling", nil)
 	got = texts(res.View)
-	contains(t, got, "breadcrumb ||||| /家→home /客厅→back /吸顶灯", "row 「吸顶灯」的设置和其他项 · 2|吸顶灯 辅光开关、吸顶灯 厂商自定义 通电默认状态|", "→sub")
+	contains(t, got, "header 客厅吸顶灯||||| {开 positive} (类型=灯) (区域=客厅) (变更=01-02 11:04)", "row 「吸顶灯」的设置和其他项 · 2|吸顶灯 辅光开关、吸顶灯 厂商自定义 通电默认状态|", "→sub")
 	res, _ = act(t, a, st, "sub", nil)
 	contains(t, texts(res.View), "## 「吸顶灯」的设置和其他项 · 2", "row 吸顶灯 厂商自定义 通电默认状态|设置 · 开关|", "→open:switch.ceiling_power_default", "收起")
 
 	// 动态: the last two hours, newest first, a noisy sensor one row, hidden areas left out
-	now := time.Now().UTC()
+	// Anchor calendar-day fixtures at request-local noon: subtracting minutes from the live clock crosses
+	// midnight and makes today's expected rows belong to yesterday. The fake logbook returns these fixtures.
+	loc := req(nil, "", nil).Location()
+	year, month, day := time.Now().In(loc).Date()
+	now := time.Date(year, month, day, 12, 0, 0, 0, loc)
 	at := func(m int) string { return now.Add(-time.Duration(m) * time.Minute).Format(time.RFC3339) }
 	rows := []string{
 		`{"when":"` + at(30) + `","name":"客厅吸顶灯","state":"on","entity_id":"light.ceiling","context_entity_id":"automation.night","context_name":"夜灯"}`,
@@ -1103,20 +1111,40 @@ func TestPageDevices(t *testing.T) {
 	for i := range 12 {
 		rows = append(rows, fmt.Sprintf(`{"when":"%s","name":"客厅温度","state":"%d","entity_id":"sensor.living_temp"}`, at(60-i*4), 20+i))
 	}
+	rows = append(rows, `{"when":"`+at(24*60+30)+`","name":"前一天的灯","state":"on","entity_id":"light.yesterday"}`,
+		`{"when":"`+at(4)+`","name":"日期和时间","state":"2026-11-10T13:04:00Z","entity_id":"sensor.date_time"}`)
+	r.mu.Lock()
+	r.state["sensor.date_time"] = State{EntityID: "sensor.date_time", State: "2026-11-10T13:04:00Z",
+		Attributes: map[string]any{"friendly_name": "日期和时间"}}
+	r.state["light.yesterday"] = State{EntityID: "light.yesterday", State: "on",
+		Attributes: map[string]any{"friendly_name": "前一天的灯"}}
+	r.mu.Unlock()
 	r.logbook = "[" + strings.Join(rows, ",") + "]"
-	res, st = act(t, a, pageState{}, "tab", map[string]string{"tab": "log"})
+	res, st = act(t, a, pageState{Tab: "log"}, "refresh", nil)
 	got = texts(res.View)
-	contains(t, got, `[tabs tab="log"`, "## 最近 2 小时", "row 厨房漏水 → 有水|", "· 厨房|", "→open:binary_sensor.leak",
-		"row 客厅吸顶灯 → 开|", "· 客厅 · 由自动化「夜灯」|", "row 客厅温度 变化了 12 次|", "最后是31 °C")
+	// devices only by default: lights, switches, covers, locks, automations; sensors and people are under 全部
+	contains(t, got, `[tabs tab="log"`, "segmented ||devices", "## 今天 · 1", "row 客厅吸顶灯 → 开|客厅 · 由自动化「夜灯」|",
+		"## 昨天 · 1", "row 前一天的灯 → 开|")
+	if strings.Contains(got, "厨房漏水") || strings.Contains(got, "客厅温度") {
+		t.Errorf("a sensor in the devices feed:\n%s", got)
+	}
+	res, st = act(t, a, st, "log", map[string]string{"log": "all"})
+	got = texts(res.View)
+	contains(t, got, "segmented ||all", "## 今天 · 3", "row 厨房漏水 → 有水|厨房|", "→open:binary_sensor.leak",
+		"row 客厅温度 变化了 12 次|客厅 · 最后是31 °C|", "## 昨天 · 1", "row 前一天的灯 → 开|")
+	if strings.Contains(got, "日期和时间") {
+		t.Errorf("a clock sensor is in the feed:\n%s", got)
+	}
 	if strings.Contains(got, "别处") || strings.Index(got, "厨房漏水") > strings.Index(got, "客厅吸顶灯") || res.View.Search != nil {
 		t.Errorf("hidden, out of order, or a search box:\n%s", got)
 	}
-	if res, back := act(t, a, st, "open:binary_sensor.leak", nil); !strings.Contains(texts(res.View), "/动态→back") || back.Tab != "log" {
+	if res, back := act(t, a, st, "open:binary_sensor.leak", nil); !strings.Contains(texts(res.View), "header 厨房漏水") || back.Tab != "log" {
 		t.Errorf("from 动态:\n%s", texts(res.View))
 	}
+	res, st = act(t, a, st, "log", map[string]string{"log": "devices"})
 	r.logbook = "[]"
 	res, _ = act(t, a, st, "refresh", nil)
-	contains(t, texts(res.View), "empty 最近 2 小时家里没有变化")
+	contains(t, texts(res.View), "empty 最近 2 小时设备没有变化")
 
 	// 自动化: none yet (the user's home), then an automation, a script and a scene
 	res, st = act(t, a, pageState{}, "tab:auto", nil)
@@ -1132,14 +1160,14 @@ func TestPageDevices(t *testing.T) {
 	r.mu.Unlock()
 	res, st = act(t, a, st, "refresh", nil)
 	got = texts(res.View)
-	contains(t, got, "## 自动化 · 1", "row 夜灯|上次 ", "[开着 positive] →open:automation.night", "## 脚本 · 1",
+	contains(t, got, "## 自动化 · 1", "row 夜灯||", "[开着 positive] →open:automation.night", "## 脚本 · 1",
 		"→do:script.movie|turn_on (confirm 运行脚本「看电影」？)", "## 场景 · 1", "→do:scene.relax|turn_on (confirm 执行场景「放松」？)")
 	act(t, a, st, "do:script.movie|turn_on", nil)
 	if f(r).lastCall() != "script.turn_on [script.movie] {}" {
 		t.Fatalf("script: %q", f(r).lastCall())
 	}
 	res, st = act(t, a, st, "open:automation.night", nil)
-	contains(t, texts(res.View), "/自动化→back", "button 停用||||| →svc:turn_off (confirm 停用「夜灯」？)", "→svc:trigger (confirm 触发一次「夜灯」？)")
+	contains(t, texts(res.View), "header 夜灯|||||", "button 停用||||| →svc:turn_off (confirm 停用「夜灯」？)", "→svc:trigger (confirm 触发一次「夜灯」？)")
 	act(t, a, st, "svc:trigger", nil)
 	if f(r).lastCall() != "automation.trigger [automation.night] {}" {
 		t.Fatalf("trigger: %q", f(r).lastCall())
@@ -1147,4 +1175,5 @@ func TestPageDevices(t *testing.T) {
 	if _, home := act(t, a, st, "tab", map[string]string{"tab": "home"}); home.Tab != "" || home.Entity != "" {
 		t.Errorf("back home: %+v", home)
 	}
+
 }
