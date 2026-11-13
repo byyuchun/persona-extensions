@@ -1,0 +1,145 @@
+{
+  "manifest_version": 1,
+  "id": "ats",
+  "name": "ATS 任务调度",
+  "version": "0.4.2",
+  "icon": "assets/icon.png",
+  "description": "把待办交给 Agent 排队去做的任务队列。助手替你给待办派任务（每次派之前都问你），队列按优先级、难度和剩余额度挑时机，在你选的电脑上为每个任务开一个独立的 git 工作目录和一个 Agent 会话；做完后在那台电脑上跑验收命令，把结论和证据写回待办。任务默认只读，只能在你允许的仓库目录里跑。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/tree/main/extensions/ats",
+  "tags": ["agents", "assistant", "todos", "scheduler"],
+  "engines": {"persona": ">=202611092100", "extension_protocol": 1},
+  "activation_events": ["on_startup"],
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/ats-linux-amd64",
+      "linux-arm64": "bin/ats-linux-arm64",
+      "darwin-arm64": "bin/ats-darwin-arm64",
+      "darwin-amd64": "bin/ats-darwin-amd64"
+    },
+    "args": ["hub"],
+    "http": true
+  },
+  "node": {
+    "command": {
+      "linux-amd64": "bin/ats-linux-amd64",
+      "linux-arm64": "bin/ats-linux-arm64",
+      "darwin-arm64": "bin/ats-darwin-arm64",
+      "darwin-amd64": "bin/ats-darwin-amd64"
+    },
+    "args": ["node"],
+    "machines": "machines",
+    "permissions": {"files": true}
+  },
+  "contributes": {
+    "assistant": [
+      {"id": "queue", "skills": ["skills/ats-todo"], "gate": "assistant/gate.json"}
+    ],
+    "ui": [
+      {"id": "queue", "title": "ATS 队列", "placement": "nav_page", "icon": "list"}
+    ]
+  },
+  "permissions": {
+    "usage_gateways": true,
+    "hub": ["todos.write", "agents.read", "agents.control", "machines.read", "extensions.call:ats"]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "machines": {
+        "type": "array",
+        "title": "在哪些电脑上跑任务",
+        "description": "打开的电脑上会装这个扩展的程序：给每个任务开一个 git 工作目录、跑验收命令。一台都不选时任务只排队、不会跑。",
+        "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]},
+        "x-confirm": "这台电脑上会由 Agent 无人值守地执行排队的任务，并运行任务带的验收命令（shell 命令）。只读任务用计划模式；可写任务用下面选的权限模式。只会在「允许的仓库目录」里的仓库上进行。"
+      },
+      "repos": {
+        "type": "array",
+        "title": "允许的仓库目录",
+        "description": "任务只能在这些目录里的 git 仓库上跑，写绝对路径或 ~/ 开头的路径（~ 是那台电脑的家目录）。空着时不能派任务。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+        "maxItems": 32,
+        "default": []
+      },
+      "write_permission_mode": {
+        "type": "string",
+        "title": "可写任务的权限模式",
+        "description": "只读任务总是用计划模式。可写任务没有人在旁边批准，所以默认自动接受文件修改；其他命令仍会停下来等你，在队列页显示「等你处理」。",
+        "oneOf": [
+          {"const": "acceptEdits", "title": "自动接受文件修改"},
+          {"const": "default", "title": "每一步都问"},
+          {"const": "auto", "title": "自动判断"},
+          {"const": "bypassPermissions", "title": "全部放行"}
+        ],
+        "default": "acceptEdits"
+      },
+      "parallel_per_machine": {
+        "type": "integer",
+        "title": "每台电脑同时跑几个任务",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      },
+      "task_timeout_minutes": {
+        "type": "integer",
+        "title": "单个任务最长跑多久（分钟）",
+        "description": "Agent 超过这个时间还没做完就打断，按超时失败处理。",
+        "minimum": 5,
+        "maximum": 1440,
+        "default": 120
+      },
+      "acceptance_timeout_minutes": {
+        "type": "integer",
+        "title": "验收命令最长跑多久（分钟）",
+        "minimum": 1,
+        "maximum": 60,
+        "default": 10
+      },
+      "max_queued": {
+        "type": "integer",
+        "title": "最多排队多少个任务",
+        "description": "排队的任务到这个数以后，新任务会被拒绝（too_many_queued）。",
+        "minimum": 1,
+        "maximum": 10000,
+        "default": 100
+      },
+      "max_retries": {
+        "type": "integer",
+        "title": "失败后自动重试几次",
+        "description": "每次重试前等待的时间逐次加长。",
+        "minimum": 0,
+        "maximum": 10,
+        "default": 2
+      },
+      "reserve_headroom_pct": {
+        "type": "integer",
+        "title": "额度保留线（%）",
+        "description": "剩余额度低于这条线时只放行 P0、P1 的任务，其余的等额度恢复。额度读的是 Hub 里网关账号的用量窗口。",
+        "minimum": 5,
+        "maximum": 90,
+        "default": 30
+      },
+      "model_fast": {
+        "type": "string",
+        "title": "easy 任务用的模型",
+        "description": "空着用 Agent 自己的默认模型。",
+        "maxLength": 100,
+        "default": ""
+      },
+      "model_standard": {
+        "type": "string",
+        "title": "medium 任务用的模型",
+        "description": "空着用 Agent 自己的默认模型。",
+        "maxLength": 100,
+        "default": ""
+      },
+      "model_strong": {
+        "type": "string",
+        "title": "hard、extreme 任务用的模型",
+        "description": "空着用 Agent 自己的默认模型。",
+        "maxLength": 100,
+        "default": ""
+      }
+    }
+  }
+}
