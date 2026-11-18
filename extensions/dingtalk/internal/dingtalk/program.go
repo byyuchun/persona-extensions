@@ -39,8 +39,11 @@ func Channel() wire.ChannelItem {
 
 // Program is the extension's program for the SDK (ext.Serve, ext.Main): the robot starts at initialize, with the
 // user's language and the connector's secrets; channel.send, channel.typing and the connector's calls go to it.
-func Program(version string) ext.Program {
-	p := &program{agent: "Persona/" + version}
+func Program(version string) ext.Program { return newProgram(version, nil) }
+
+// newProgram is Program with the robot's options adjusted before it starts (tests: a fake DingTalk).
+func newProgram(version string, options func(*Options)) ext.Program {
+	p := &program{agent: "Persona/" + version, options: options}
 	return ext.Program{ID: ID, Version: version, Init: p.init,
 		Namespaces: map[string]ext.Handler{ext.ConnectorNamespace: p.connector, ext.ChannelNamespace: p.channel}}
 }
@@ -191,7 +194,8 @@ func (r *sentRefs) do(ref string, send func() (wire.ChannelSendResult, error)) (
 	r.mu.Unlock()
 	cur.res, cur.err = send()
 	r.mu.Lock()
-	if cur.err != nil {
+	var k kept
+	if cur.err != nil && !errors.As(cur.err, &k) {
 		delete(r.sent, ref) // forget a failed send before waking its waiters, so the ref may be sent again
 	} else {
 		r.order = append(r.order, ref)

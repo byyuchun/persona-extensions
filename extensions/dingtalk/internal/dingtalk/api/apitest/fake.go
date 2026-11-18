@@ -41,6 +41,13 @@ type Fake struct {
 	Invalid, Held map[string]bool
 	// Fail answers every send with this HTTP status (0: none).
 	Fail int
+	// LoseAnswers is how many more sends are taken (recorded as delivered) but answered by dropping the
+	// connection: the client cannot tell whether they arrived.
+	LoseAnswers int
+	// Limit answers this many more sends with HTTP 429 before taking them.
+	Limit int
+	// RefuseAfter refuses every send (HTTP 400) once this many were delivered (0: never).
+	RefuseAfter int
 	// PlainDownloads gives download addresses as http (as DingTalk does for its OSS buckets).
 	PlainDownloads bool
 	tokens         int
@@ -174,6 +181,15 @@ func (f *Fake) send(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, f.Fail, map[string]string{"code": "ServiceUnavailable"})
 		return
 	}
+	if f.RefuseAfter > 0 && len(f.sent) >= f.RefuseAfter {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalidParameter"})
+		return
+	}
+	if f.Limit > 0 {
+		f.Limit--
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"code": "Throttling"})
+		return
+	}
 	who := in.UserIDs[0]
 	switch {
 	case f.Invalid[who]:
@@ -186,6 +202,13 @@ func (f *Fake) send(w http.ResponseWriter, r *http.Request) {
 	var p struct{ Title, Text string }
 	_ = json.Unmarshal([]byte(in.MsgParam), &p)
 	f.sent = append(f.sent, Sent{StaffID: who, Title: p.Title, Text: p.Text})
+	if f.LoseAnswers > 0 {
+		f.LoseAnswers--
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close() // delivered, but the answer never comes back
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"processQueryKey": "synthetic-key"})
 }
 

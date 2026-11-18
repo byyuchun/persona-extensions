@@ -4,6 +4,7 @@
   "chat.not_paired": "This robot isn't paired yet. In Persona, open Settings › Channels › DingTalk, bind it, and send the code shown there to this chat.",
   "chat.paired": "Paired. What you send here now goes to Persona.",
   "chat.send_failed": "DingTalk didn't take this message",
+  "chat.send_uncertain": "DingTalk didn't confirm this message; it may have arrived, so it isn't sent again",
   "chat.stranger": "This robot only works for the person who paired it.",
   "chat.wrong_code": "That code is wrong. Check the code shown in Persona.",
   "dingtalk.account_unnamed": "DingTalk user",

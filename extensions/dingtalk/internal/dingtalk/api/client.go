@@ -113,6 +113,34 @@ func Retryable(err error) bool {
 	return errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// NotSent says a send certainly did not reach DingTalk, so sending it again cannot duplicate it: DingTalk held it
+// back (flow control, rate limit), or no connection was made.
+func NotSent(err error) bool {
+	if errors.Is(err, ErrFlowControlled) {
+		return true
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Status == http.StatusTooManyRequests
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns)
+}
+
+// Refused says DingTalk answered and did not take the request (a 4xx other than a rate limit, or a receiver it
+// cannot reach): it was not delivered.
+func Refused(err error) bool {
+	if errors.Is(err, ErrNotReachable) {
+		return true
+	}
+	var e *Error
+	return errors.As(err, &e) && e.Status >= 400 && e.Status < 500 && e.Status != http.StatusTooManyRequests
+}
+
 // Unauthorized says DingTalk refused the app's credentials (a wrong or reset secret, a disabled app): a 401 or 403,
 // or a 400 about the client or its secret.
 func Unauthorized(err error) bool {
