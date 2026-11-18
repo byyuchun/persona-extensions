@@ -3,6 +3,7 @@ package wecom
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log"
 	"mime"
@@ -20,15 +21,19 @@ import (
 const (
 	// imagesMost is how many pictures one message brings the hub, imageMost and fileMost how large each may be
 	// (docs/extensions/channels.md "Protocol" in Persona).
-	imagesMost  = 4
-	imageMost   = 3 << 20
-	fileMost    = 50 << 20
+	imagesMost = 4
+	imageMost  = 3 << 20
+	fileMost   = 50 << 20
+	// blobsMost is how many bytes of pictures and files one message brings in all: the hub's own total
+	// (docs/extensions/channels.md "Protocol"). It also keeps the base64 channel.receive frame (4/3 of it, ≈ 53 MiB)
+	// under the extension protocol's 64 MiB line, which a single 50 MB file would overrun.
+	blobsMost = 40 << 20
+	// frameMost is the most a channel.receive may encode to: the protocol reader's 64 MiB line, less room for the
+	// envelope. A message over it loses its blobs, last first, rather than the connection.
+	frameMost   = 63 << 20
 	maxSeen     = 300
 	strangerGap = 10 * time.Minute
 )
-
-// sendRetryWait is the first wait before sending a piece again (then twice, three times as long); tests shorten it.
-var sendRetryWait = time.Second
 
 // handle takes one message to the robot. Groups are never handled; in a one-to-one chat the owner's message goes to
 // the hub, a pairing code pairs, and anyone else hears whose robot it is.
@@ -125,34 +130,46 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 	if s == nil || o == nil {
 		return wire.ChannelSendResult{}, errCannotSend
 	}
-	for _, part := range Chunk(strings.TrimSpace(p.Text), MaxText) {
-		var err error
-		for attempt := range 3 {
-			if err = s.SendMarkdown(ctx, o.UserID, part); err == nil || !retryable(err) {
-				break
-			}
-			if !sleep(ctx, time.Duration(attempt+1)*sendRetryWait) {
-				return wire.ChannelSendResult{}, ctx.Err()
-			}
-		}
-		if err != nil {
+	// nothing is sent again here: WeCom keeps no idempotency key, and a send whose answer did not come back may
+	// already be in the owner's chat
+	for i, part := range Chunk(strings.TrimSpace(p.Text), MaxText) {
+		err := s.SendMarkdown(ctx, o.UserID, part)
+		var e *api.Error
+		switch {
+		case err == nil:
+		case errors.Is(err, api.ErrNotSent) || errors.As(err, &e):
 			log.Printf("wecom: sending a message: %v", err)
-			return wire.ChannelSendResult{}, sendFailed{b.lang()}
+			return wire.ChannelSendResult{}, keep(i, sendFailed{b.lang()})
+		default:
+			log.Printf("wecom: sending a message, outcome unknown: %v", err)
+			return wire.ChannelSendResult{}, kept{sendUncertain{b.lang()}}
 		}
 	}
 	return wire.ChannelSendResult{}, nil
-}
-
-// retryable: no answer in time (WeCom's refusals, with an errcode, are not tried again).
-func retryable(err error) bool {
-	var e *api.Error
-	return !errors.As(err, &e) && errors.Is(err, context.DeadlineExceeded)
 }
 
 // sendFailed: WeCom did not take the message (logged by the hub, which sends it again with the same ref).
 type sendFailed struct{ lang string }
 
 func (e sendFailed) Error() string { return t(e.lang, "chat.send_failed") }
+
+// sendUncertain: the message went out but WeCom's answer did not come back; it may have been delivered.
+type sendUncertain struct{ lang string }
+
+func (e sendUncertain) Error() string { return t(e.lang, "chat.send_uncertain") }
+
+// kept is a send failure whose ref must not be sent again: part of it may already be in the owner's chat.
+type kept struct{ error }
+
+func (k kept) Unwrap() error { return k.error }
+
+// keep is err for a send that failed at piece i: kept when earlier pieces were delivered.
+func keep(i int, err error) error {
+	if i > 0 {
+		return kept{err}
+	}
+	return err
+}
 
 // empty says whether m has nothing to hand on.
 func empty(m wire.ChannelMessage) bool {
@@ -164,6 +181,7 @@ func empty(m wire.ChannelMessage) bool {
 // pictures and the files; what cannot be brought is named for the assistant.
 func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.ChannelMessage {
 	out := wire.ChannelMessage{ID: m.ID, Text: m.PlainText(), Quote: m.QuoteText()}
+	left := int64(blobsMost) // bytes of pictures and files still allowed
 	for _, p := range m.Parts() {
 		switch p.Kind {
 		case api.KindText:
@@ -176,23 +194,38 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 				out.Unsupported = append(out.Unsupported, "更多的图片") // i18n-ignore: what the assistant reads
 				continue
 			}
-			data, _, err := c.Download(ctx, p.URL, p.AESKey, imageMost)
+			most := min(int64(imageMost), left)
+			if most <= 0 {
+				out.Unsupported = append(out.Unsupported, tooMuch)
+				continue
+			}
+			data, _, err := c.Download(ctx, p.URL, p.AESKey, most)
 			switch {
+			case errors.Is(err, api.ErrTooLarge) && most < imageMost:
+				out.Unsupported = append(out.Unsupported, tooMuch)
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, "一张太大的图片") // i18n-ignore: what the assistant reads
 			case err != nil:
 				log.Printf("wecom: downloading a picture: %v", err)
 				out.Unsupported = append(out.Unsupported, "一张没下载下来的图片") // i18n-ignore: what the assistant reads
 			default:
+				left -= int64(len(data))
 				out.Images = append(out.Images, wire.ChannelBlob{Mime: http.DetectContentType(data), Data: base64.StdEncoding.EncodeToString(data)})
 			}
 		case api.KindFile:
-			data, given, err := c.Download(ctx, p.URL, p.AESKey, fileMost)
+			most := min(int64(fileMost), left)
+			if most <= 0 {
+				out.Unsupported = append(out.Unsupported, fileLabel(p.FileName)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
+				continue
+			}
+			data, given, err := c.Download(ctx, p.URL, p.AESKey, most)
 			name := p.FileName
 			if name == "" {
 				name = given
 			}
 			switch {
+			case errors.Is(err, api.ErrTooLarge) && most < fileMost:
+				out.Unsupported = append(out.Unsupported, fileLabel(name)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, fileLabel(name)+"（超过 50 MB）") // i18n-ignore: what the assistant reads
 			case err != nil:
@@ -202,6 +235,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 				if name == "" {
 					name = "file"
 				}
+				left -= int64(len(data))
 				out.Files = append(out.Files, wire.ChannelBlob{Name: name, Mime: fileMime(name, data), Data: base64.StdEncoding.EncodeToString(data)})
 			}
 		case api.KindVideo:
@@ -210,8 +244,35 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			out.Unsupported = append(out.Unsupported, "一条暂不支持的企业微信消息") // i18n-ignore: what the assistant reads
 		}
 	}
+	fitFrame(&out)
 	out.Unsupported = slices.Compact(out.Unsupported)
 	return out
+}
+
+// tooMuch names what did not fit in a message's total for pictures and files.
+const tooMuch = "附件合计超过 40 MB，放不下" // i18n-ignore: what the assistant reads
+
+// fitFrame drops m's files, then pictures, last first, until channel.receive's frame fits under frameMost (blobsMost
+// already keeps it there; this holds for a long text too).
+func fitFrame(m *wire.ChannelMessage) {
+	for frameSize(*m) > frameMost && len(m.Files)+len(m.Images) > 0 {
+		if n := len(m.Files); n > 0 {
+			m.Unsupported = append(m.Unsupported, fileLabel(m.Files[n-1].Name)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
+			m.Files = m.Files[:n-1]
+		} else {
+			m.Unsupported = append(m.Unsupported, tooMuch)
+			m.Images = m.Images[:len(m.Images)-1]
+		}
+	}
+}
+
+// frameSize is how large channel.receive with m encodes to.
+func frameSize(m wire.ChannelMessage) int {
+	raw, err := json.Marshal(wire.ChannelReceiveParams{Contribution: ID, Message: m})
+	if err != nil {
+		return 0
+	}
+	return len(raw)
 }
 
 // fileMime is a file's type: from its bytes, else from its name's extension.

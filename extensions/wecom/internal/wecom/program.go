@@ -190,7 +190,8 @@ func (r *sentRefs) do(ref string, send func() (wire.ChannelSendResult, error)) (
 	r.mu.Unlock()
 	cur.res, cur.err = send()
 	r.mu.Lock()
-	if cur.err != nil {
+	var k kept
+	if cur.err != nil && !errors.As(cur.err, &k) {
 		delete(r.sent, ref) // forget a failed send before waking its waiters, so the ref may be sent again
 	} else {
 		r.order = append(r.order, ref)

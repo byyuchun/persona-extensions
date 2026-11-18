@@ -274,11 +274,11 @@ func TestSendRefusedAndLogout(t *testing.T) {
 	r := newRig(t)
 	r.pair()
 	ctx := context.Background()
-	r.f.Refuse = 40096
+	r.f.Set(func(x *apitest.Fake) { x.Refuse = 40096 })
 	if _, err := r.bot.Send(ctx, wire.ChannelSendParams{Ref: "a", Text: "x"}); err == nil || errors.Is(err, errCannotSend) {
 		t.Errorf("a refused send: %v", err)
 	}
-	r.f.Refuse = 0
+	r.f.Set(func(x *apitest.Fake) { x.Refuse = 0 })
 	if err := r.bot.Logout(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -326,3 +326,24 @@ func TestLocalesHaveTheSameKeys(t *testing.T) {
 
 // msg is a text of the default language (the tests' robot is not told one).
 func msg(key string) string { return t("", key) }
+
+// The most a message may bring still encodes under the extension protocol's frame line; past it, blobs are dropped
+// and named rather than the connection lost (the issue found in review of #311 applies here too).
+func TestFullBlobBudgetFitsTheFrame(t *testing.T) {
+	blob := func(n int) wire.ChannelBlob {
+		return wire.ChannelBlob{Name: "f", Mime: "application/octet-stream", Data: strings.Repeat("A", (n+2)/3*4)}
+	}
+	m := wire.ChannelMessage{ID: "m", Text: strings.Repeat("字", 64<<10)}
+	for range imagesMost {
+		m.Images = append(m.Images, blob(imageMost))
+	}
+	m.Files = []wire.ChannelBlob{blob(blobsMost - imagesMost*imageMost)}
+	if n := frameSize(m); n > frameMost {
+		t.Fatalf("a full message encodes to %d bytes, over %d", n, frameMost)
+	}
+	m.Files = append(m.Files, blob(20<<20))
+	fitFrame(&m)
+	if frameSize(m) > frameMost || len(m.Files) != 1 || len(m.Unsupported) != 1 {
+		t.Fatalf("after fitting: %d bytes, %d files, %q", frameSize(m), len(m.Files), m.Unsupported)
+	}
+}

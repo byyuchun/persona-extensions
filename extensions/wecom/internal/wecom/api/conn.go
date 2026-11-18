@@ -39,9 +39,11 @@ const (
 
 const (
 	readLimit   = 4 << 20
-	answerWait  = 10 * time.Second
 	dialTimeout = 15 * time.Second
 )
+
+// answerWait is how long a request waits for WeCom's answer unless Options say otherwise.
+const answerWait = 10 * time.Second
 
 // PingEvery is how often the connection sends a heartbeat (WeCom asks for every 30 seconds); tests shorten it.
 var PingEvery = 30 * time.Second
@@ -54,6 +56,8 @@ type Options struct {
 	// HTTP makes the WebSocket dial and media downloads (its transport, so HTTPS_PROXY is used, when nil). It must
 	// have no Timeout: the WebSocket dial refuses one.
 	HTTP *http.Client
+	// AnswerWait is how long a request waits for WeCom's answer (answerWait when 0); tests shorten it.
+	AnswerWait time.Duration
 	// MediaHosts are the hosts media may be downloaded from (a host or "*.suffix"); the defaults when empty.
 	MediaHosts []string
 }
@@ -75,6 +79,9 @@ func New(opt Options) (*Client, error) {
 	if opt.HTTP == nil {
 		opt.HTTP = &http.Client{}
 	}
+	if opt.AnswerWait <= 0 {
+		opt.AnswerWait = answerWait
+	}
 	if len(opt.MediaHosts) == 0 {
 		opt.MediaHosts = DefaultMediaHosts
 	}
@@ -90,6 +97,13 @@ type Error struct {
 func (e *Error) Error() string {
 	return fmt.Sprintf("WeCom answered errcode %d: %s", e.Code, e.Message)
 }
+
+// ErrNotSent: the request never left (the connection would not take it); sending it again cannot duplicate it.
+var ErrNotSent = errors.New("not sent")
+
+// ErrNoAnswer: the request went out but its answer did not come back (a timeout, the connection closing). WeCom may
+// have taken it: an unknown outcome, never a reason to send it again.
+var ErrNoAnswer = errors.New("sent, but WeCom's answer did not come back")
 
 // ErrKicked: another connection subscribed the same robot (another program, or another hub), and WeCom closed this
 // one. Connecting again would take the robot back, and the two would keep closing each other.
@@ -124,6 +138,7 @@ func newReqID(cmd string) string {
 // Session is one subscribed connection: what the robot sends goes through it.
 type Session struct {
 	conn *websocket.Conn
+	wait time.Duration // how long a request waits for its answer
 
 	mu      sync.Mutex
 	waiting map[string]chan Frame
@@ -134,7 +149,7 @@ func (s *Session) write(ctx context.Context, f Frame) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, answerWait)
+	ctx, cancel := context.WithTimeout(ctx, s.wait)
 	defer cancel()
 	return s.conn.Write(ctx, websocket.MessageText, raw)
 }
@@ -165,23 +180,23 @@ func (s *Session) request(ctx context.Context, cmd string, body any) error {
 		raw = nil
 	}
 	if err := s.write(ctx, Frame{Cmd: cmd, Headers: map[string]string{"req_id": id}, Body: raw}); err != nil {
-		return fmt.Errorf("writing to WeCom: %w", err)
+		return fmt.Errorf("%w: writing to WeCom: %w", ErrNotSent, err)
 	}
-	t := time.NewTimer(answerWait)
+	t := time.NewTimer(s.wait)
 	defer t.Stop()
 	select {
 	case f, ok := <-ch:
 		if !ok {
-			return errors.New("the WeCom connection closed before it answered")
+			return fmt.Errorf("%w: the WeCom connection closed before it answered", ErrNoAnswer)
 		}
 		if f.ErrCode != nil && *f.ErrCode != 0 {
 			return &Error{Code: *f.ErrCode, Message: errText(f.ErrMsg)}
 		}
 		return nil
 	case <-t.C:
-		return fmt.Errorf("WeCom did not answer %s in %s: %w", cmd, answerWait, context.DeadlineExceeded)
+		return fmt.Errorf("%w: WeCom did not answer %s in %s", ErrNoAnswer, cmd, s.wait)
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%w: %w", ErrNoAnswer, ctx.Err())
 	}
 }
 
@@ -243,7 +258,7 @@ func (c *Client) open(ctx context.Context) (*Session, error) {
 		return nil, fmt.Errorf("connecting to WeCom: %w", err)
 	}
 	conn.SetReadLimit(readLimit)
-	s := &Session{conn: conn, waiting: map[string]chan Frame{}}
+	s := &Session{conn: conn, wait: c.opt.AnswerWait, waiting: map[string]chan Frame{}}
 	id := newReqID(cmdSubscribe)
 	body, _ := json.Marshal(map[string]string{"bot_id": c.opt.BotID, "secret": c.opt.Secret})
 	if err := s.write(dctx, Frame{Cmd: cmdSubscribe, Headers: map[string]string{"req_id": id}, Body: body}); err != nil {

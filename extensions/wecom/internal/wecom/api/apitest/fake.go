@@ -38,6 +38,10 @@ type Fake struct {
 	mu    sync.Mutex
 	media map[string][]byte // encrypted, by name
 	names map[string]string // the file name its download gives, by name
+	// LoseAnswers is how many more aibot_send_msg are taken (recorded as delivered) but never answered.
+	LoseAnswers int
+	// LoseFrom loses the answers of every send once this many were delivered, the current one included (0: never).
+	LoseFrom int
 	// Refuse answers every aibot_send_msg with this errcode (0: none).
 	Refuse     int
 	subscribes int
@@ -65,11 +69,19 @@ func New(t testing.TB) *Fake {
 	return f
 }
 
+// Set changes the fake's behavior (Refuse, LoseAnswers, LoseFrom) under its lock: its connection reads them.
+func (f *Fake) Set(change func(f *Fake)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(f)
+}
+
 // Options are a client's options for the fake (credentials apart).
 func (f *Fake) Options(botID, secret string) api.Options {
 	host := strings.TrimPrefix(f.Server.URL, "https://")
 	h, _, _ := strings.Cut(host, ":")
-	return api.Options{BotID: botID, Secret: secret, URL: "wss://" + host + "/", HTTP: f.Server.Client(), MediaHosts: []string{h}}
+	return api.Options{BotID: botID, Secret: secret, URL: "wss://" + host + "/", HTTP: f.Server.Client(), MediaHosts: []string{h},
+		AnswerWait: 300 * time.Millisecond} // the fake answers at once, or never
 }
 
 // Key is the synthetic AES key for name, as WeCom gives it (base64, no padding), and its bytes.
@@ -174,7 +186,14 @@ func (f *Fake) connect(w http.ResponseWriter, r *http.Request) {
 			if refuse == 0 && b.ChatType == 1 && b.MsgType == "markdown" {
 				f.sent = append(f.sent, Sent{UserID: b.ChatID, Text: b.Markdown.Content})
 			}
+			lose := refuse == 0 && (f.LoseAnswers > 0 || f.LoseFrom > 0 && len(f.sent) >= f.LoseFrom)
+			if lose && f.LoseAnswers > 0 {
+				f.LoseAnswers--
+			}
 			f.mu.Unlock()
+			if lose {
+				continue // delivered; the acknowledgement is lost
+			}
 			if refuse != 0 {
 				answer(id, refuse, "refused")
 			} else {

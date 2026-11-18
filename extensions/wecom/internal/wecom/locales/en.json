@@ -4,6 +4,7 @@
   "chat.not_paired": "This robot isn't paired yet. In Persona, open Settings › Channels › WeCom, bind it, and send the code shown there to this chat.",
   "chat.paired": "Paired. What you send here now goes to Persona.",
   "chat.send_failed": "WeCom didn't take this message",
+  "chat.send_uncertain": "WeCom didn't confirm this message; it may have arrived, so it isn't sent again",
   "chat.stranger": "This robot only works for the person who paired it.",
   "chat.wrong_code": "That code is wrong. Check the code shown in Persona.",
   "guide.bind": "Enter the robot's BotID and Secret here, then send the pairing code to the robot in a one-to-one chat.",

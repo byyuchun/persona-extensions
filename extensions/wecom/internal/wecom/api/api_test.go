@@ -84,7 +84,7 @@ func TestRunDeliversInOrderSendsAndHeartbeats(t *testing.T) {
 	if sent := f.Sent(); len(sent) != 1 || sent[0] != (apitest.Sent{UserID: "user-1", Text: "**hi**"}) {
 		t.Fatalf("sent %+v", sent)
 	}
-	f.Refuse = 40096
+	f.Set(func(x *apitest.Fake) { x.Refuse = 40096 })
 	var e *api.Error
 	if err := s.SendMarkdown(ctx, "user-1", "x"); !errors.As(err, &e) || e.Code != 40096 {
 		t.Fatalf("a refused send: %v", err)
