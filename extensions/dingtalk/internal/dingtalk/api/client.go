@@ -41,7 +41,9 @@ type Options struct {
 	// Timeout: the WebSocket dial refuses one; every call bounds itself with a context instead.
 	HTTP  *http.Client
 	Agent string // the User-Agent product token ("Persona/<version>")
-	Now   func() time.Time
+	// DialTimeout bounds connecting to the Stream endpoint (requestTimeout when 0); tests shorten it.
+	DialTimeout time.Duration
+	Now         func() time.Time
 }
 
 // Client talks to DingTalk for one app.
@@ -70,6 +72,9 @@ func New(opt Options) (*Client, error) {
 	}
 	if opt.Now == nil {
 		opt.Now = time.Now
+	}
+	if opt.DialTimeout <= 0 {
+		opt.DialTimeout = requestTimeout
 	}
 	return &Client{opt: opt}, nil
 }
@@ -121,7 +126,9 @@ func NotSent(err error) bool {
 	}
 	var e *Error
 	if errors.As(err, &e) {
-		return e.Status == http.StatusTooManyRequests
+		// a rate limit, or a server error DingTalk answered with its own error code: it did not take the request.
+		// A bare 5xx (a gateway with no DingTalk answer) may have been processed, and is not sent again
+		return e.Status == http.StatusTooManyRequests || e.Status >= 500 && e.Code != ""
 	}
 	var op *net.OpError
 	if errors.As(err, &op) && op.Op == "dial" {
@@ -155,6 +162,17 @@ func Unauthorized(err error) bool {
 
 // call posts body as JSON to path on the open platform and reads the answer into out (nil: dropped).
 func (c *Client) call(ctx context.Context, path string, token bool, body, out any) error {
+	err := c.callOnce(ctx, path, token, body, out)
+	var e *Error
+	if token && errors.As(err, &e) && e.Status == http.StatusUnauthorized {
+		// the token was expired or revoked before the local expiry: DingTalk refused it before doing anything, so
+		// one more try with a fresh token cannot duplicate the call
+		err = c.callOnce(ctx, path, token, body, out)
+	}
+	return err
+}
+
+func (c *Client) callOnce(ctx context.Context, path string, token bool, body, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	raw, err := json.Marshal(body)
@@ -323,6 +341,23 @@ func (c *Client) downloadURL(raw string) (*url.URL, error) {
 	}
 	u.Scheme = "https"
 	return u, nil
+}
+
+// Redact is err for a log line without a request's URL: the signed download addresses and session webhooks DingTalk
+// gives carry credentials in their query.
+func Redact(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		host := ""
+		if u, perr := url.Parse(ue.URL); perr == nil {
+			host = u.Hostname()
+		}
+		return fmt.Sprintf("%s %s: %v", ue.Op, host, ue.Err)
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // ErrTooLarge: what a download brings is larger than allowed.

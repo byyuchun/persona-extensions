@@ -14,6 +14,7 @@
   "dingtalk.not_paired": "まだペアリングされていません。連携をやり直し、DingTalk でロボットにコードを送ってください",
   "dingtalk.refused": "DingTalk がアプリの認証情報を拒否しました：{error}",
   "dingtalk.retrying": "DingTalk に接続できません。再試行しています：{error}",
+  "dingtalk.unreadable": "保存された連携が壊れています。連携し直すかサインアウトしてください",
   "dingtalk.via": "DingTalk アプリのロボット（Stream モード）",
   "guide.bind": "ここにアプリの Client ID と Client Secret を入力し、1 対 1 のチャットでペアリングコードをロボットに送ってください。",
   "guide.create_app": "DingTalk の開発者コンソールで、組織の社内アプリを作成します。",

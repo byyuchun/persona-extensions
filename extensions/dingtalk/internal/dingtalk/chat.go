@@ -40,33 +40,36 @@ const (
 // sendRetryWait is the first wait before sending a piece again (then twice, three times as long); tests shorten it.
 var sendRetryWait = time.Second
 
-// handle takes one message to the robot. Groups are never handled; in a one-to-one chat the owner's message goes to
-// the hub, a pairing code pairs, and anyone else hears whose robot it is.
-func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
+// handle takes one message to the robot and says whether it is settled (its Stream frame may be answered). Groups are
+// never handled; in a one-to-one chat the owner's message goes to the hub, a pairing code pairs, and anyone else hears
+// whose robot it is. The owner's message counts as seen only once the hub took it: when the hub fails, it is neither
+// marked seen nor settled, so DingTalk delivers it again.
+func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) bool {
 	if m.ConversationType != api.ConversationSingle {
-		return
+		return true
 	}
 	b.mu.Lock()
 	if slices.Contains(b.st.Seen, m.ID) {
 		b.mu.Unlock()
-		return
-	}
-	b.st.Seen = append(b.st.Seen, m.ID)
-	if len(b.st.Seen) > maxSeen {
-		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
+		return true
 	}
 	o := b.st.Owner
-	isOwner := o != nil && m.SenderStaffID != "" && m.SenderStaffID == o.StaffID
-	if isOwner {
+	if o != nil && m.SenderStaffID != "" && m.SenderStaffID == o.StaffID {
+		b.mu.Unlock()
+		if !b.forward(ctx, c, m) {
+			return false
+		}
+		b.mu.Lock()
+		b.markSeenLocked(m.ID)
 		b.last = b.opt.Now()
-		if m.SenderNick != "" && m.SenderNick != o.Name {
+		if o := b.st.Owner; o != nil && m.SenderNick != "" && m.SenderNick != o.Name {
 			o.Name = m.SenderNick
 		}
 		b.saveLocked(ctx)
 		b.mu.Unlock()
-		b.forward(ctx, c, m)
-		return
+		return true
 	}
+	b.markSeenLocked(m.ID)
 	var reply string
 	handled := false
 	if m.SenderStaffID != "" {
@@ -76,25 +79,44 @@ func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
 	b.mu.Unlock()
 	if handled {
 		b.reply(ctx, c, m, reply)
-		return
+	} else {
+		b.stranger(ctx, c, m, o == nil)
 	}
-	b.stranger(ctx, c, m, o == nil)
+	return true
 }
 
-// forward hands the owner's message to the hub.
-func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) {
-	msg := b.compose(ctx, c, m)
-	if empty(msg) {
-		return
+// markSeenLocked records id among the latest messages handled; b.mu is held.
+func (b *Bot) markSeenLocked(id string) {
+	b.st.Seen = append(b.st.Seen, id)
+	if len(b.st.Seen) > maxSeen {
+		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
 	}
-	if b.opt.Hub == nil {
-		log.Printf("dingtalk: no hub to hand the message to")
-		return
+}
+
+// forward hands the owner's message to the hub and says whether the hub took it. When it did not, the owner hears so
+// once per message (DingTalk delivers it again, and it is tried again then).
+func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) bool {
+	msg := b.compose(ctx, c, m)
+	if empty(msg) || b.opt.Hub == nil {
+		return true
 	}
 	if err := b.opt.Hub.Receive(ctx, msg); err != nil {
 		log.Printf("dingtalk: handing a message to the hub: %v", err)
-		b.reply(ctx, c, m, t(b.lang(), "chat.hub_error"))
+		b.mu.Lock()
+		told := b.hubErrorTold[m.ID]
+		if !told {
+			if len(b.hubErrorTold) >= maxSeen {
+				clear(b.hubErrorTold)
+			}
+			b.hubErrorTold[m.ID] = true
+		}
+		b.mu.Unlock()
+		if !told {
+			b.reply(ctx, c, m, t(b.lang(), "chat.hub_error"))
+		}
+		return false
 	}
+	return true
 }
 
 // stranger: the robot only serves the person who paired it; anyone else hears so (or how to pair, before anyone
@@ -131,7 +153,7 @@ func (b *Bot) reply(ctx context.Context, c *api.Client, m api.Message, text stri
 		return
 	}
 	if err := c.Reply(ctx, m.SessionWebhook, text); err != nil {
-		log.Printf("dingtalk: replying in the chat: %v", err)
+		log.Printf("dingtalk: replying in the chat: %s", api.Redact(err))
 	}
 }
 
@@ -144,7 +166,11 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 	if c == nil || o == nil {
 		return wire.ChannelSendResult{}, errCannotSend
 	}
-	for i, part := range Chunk(strings.TrimSpace(p.Text), MaxText) {
+	pieces := Chunk(strings.TrimSpace(p.Text), MaxText)
+	if len(pieces) == 0 {
+		return wire.ChannelSendResult{}, errNothingToSend // never reported as delivered
+	}
+	for i, part := range pieces {
 		var err error
 		for attempt := range 3 {
 			// sent again only when DingTalk certainly did not take it: a resend after an unknown outcome is a
@@ -161,15 +187,18 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 		case errors.Is(err, api.ErrNotReachable) && i == 0:
 			return wire.ChannelSendResult{}, errCannotSend
 		case api.NotSent(err) || api.Refused(err):
-			log.Printf("dingtalk: sending a message: %v", err)
+			log.Printf("dingtalk: sending a message: %s", api.Redact(err))
 			return wire.ChannelSendResult{}, keep(i, sendFailed{b.lang()})
 		default:
-			log.Printf("dingtalk: sending a message, outcome unknown: %v", err)
+			log.Printf("dingtalk: sending a message, outcome unknown: %s", api.Redact(err))
 			return wire.ChannelSendResult{}, kept{sendUncertain{b.lang()}}
 		}
 	}
 	return wire.ChannelSendResult{}, nil
 }
+
+// errNothingToSend: channel.send with no text; nothing was delivered.
+var errNothingToSend = errors.New("nothing to send: the message has no text")
 
 // sendFailed: DingTalk did not take the message (logged by the hub, which sends it again with the same ref).
 type sendFailed struct{ lang string }
@@ -227,7 +256,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, "一张太大的图片") // i18n-ignore: what the assistant reads
 			case err != nil:
-				log.Printf("dingtalk: downloading a picture: %v", err)
+				log.Printf("dingtalk: downloading a picture: %s", api.Redact(err))
 				out.Unsupported = append(out.Unsupported, "一张没下载下来的图片") // i18n-ignore: what the assistant reads
 			default:
 				left -= int64(len(data))
@@ -256,7 +285,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, fileLabel(name)+"（超过 50 MB）") // i18n-ignore: what the assistant reads
 			case err != nil:
-				log.Printf("dingtalk: downloading a file: %v", err)
+				log.Printf("dingtalk: downloading a file: %s", api.Redact(err))
 				out.Unsupported = append(out.Unsupported, "没下载下来的"+fileLabel(name)) // i18n-ignore: what the assistant reads
 			default:
 				if name == "" {
@@ -344,7 +373,11 @@ func Chunk(text string, most int) []string {
 				break
 			}
 		}
-		out = append(out, strings.TrimRight(string(r[:cut]), "\n"))
+		// only newlines are trimmed at a cut, and a piece of nothing but newlines is skipped: every other
+		// character is kept, in order, and no empty piece is sent
+		if piece := strings.TrimRight(string(r[:cut]), "\n"); piece != "" {
+			out = append(out, piece)
+		}
 		text = strings.TrimLeft(string(r[cut:]), "\n")
 	}
 	if text != "" {

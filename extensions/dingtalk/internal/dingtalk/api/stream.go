@@ -69,8 +69,11 @@ func (c *Client) endpoint(ctx context.Context, topics []string) (string, error) 
 		return "", err
 	}
 	u, err := url.Parse(out.Endpoint)
-	if err != nil || u.Scheme != "wss" || u.Host == "" || out.Ticket == "" {
+	if err != nil || u.Scheme != "wss" || u.Host == "" || u.User != nil || out.Ticket == "" {
 		return "", errors.New("DingTalk gave no usable Stream endpoint")
+	}
+	if !c.webhookHost(u.Hostname()) {
+		return "", fmt.Errorf("DingTalk's Stream endpoint is on an unexpected host %q", u.Hostname())
 	}
 	q := u.Query()
 	q.Set("ticket", out.Ticket)
@@ -80,14 +83,15 @@ func (c *Client) endpoint(ctx context.Context, topics []string) (string, error) 
 
 // Stream holds one Stream connection for topics until it fails, the server moves it (ErrMoved) or ctx ends.
 // connected is called once the connection is up; take is called for each callback frame, one at a time and in the
-// order they came, and answers whether the frame was taken: a frame not taken is left unanswered, so DingTalk
-// delivers it again.
-func (c *Client) Stream(ctx context.Context, topics []string, connected func(), take func(ctx context.Context, f Frame) bool) error {
+// order they came. A frame is answered only when its taker calls done (once, from any goroutine, after the frame was
+// handled); one never answered (not taken, failed, or lost with the process) is delivered by DingTalk again.
+func (c *Client) Stream(ctx context.Context, topics []string, connected func(), take func(ctx context.Context, f Frame, done func())) error {
 	addr, err := c.endpoint(ctx, topics)
 	if err != nil {
 		return err
 	}
-	dctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	// the dial's context bounds the handshake only: the established connection outlives it (coder/websocket)
+	dctx, cancel := context.WithTimeout(ctx, c.opt.DialTimeout)
 	conn, resp, err := websocket.Dial(dctx, addr, &websocket.DialOptions{HTTPClient: c.opt.HTTP})
 	cancel()
 	if resp != nil && resp.Body != nil {
@@ -131,13 +135,15 @@ func (c *Client) Stream(ctx context.Context, topics []string, connected func(), 
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return ErrMoved
 		case f.Type == frameCallback:
-			if take == nil || !take(ctx, f) {
+			if take == nil {
 				continue
 			}
-			if err := write(ctx, conn, ack{Code: 200, Headers: map[string]string{"contentType": "application/json", "messageId": id},
-				Data: `{"response":null}`}); err != nil {
-				return err
-			}
+			take(ctx, f, func() {
+				// answered late, from the taker's goroutine: a connection gone meanwhile leaves the frame unanswered,
+				// and DingTalk delivers it again (the taker dedups)
+				_ = write(context.WithoutCancel(ctx), conn, ack{Code: 200, Headers: map[string]string{"contentType": "application/json", "messageId": id},
+					Data: `{"response":null}`})
+			})
 		default:
 			// another type or topic it did not ask for: answered as the SDKs do, so it is not delivered again
 			if err := write(ctx, conn, ack{Code: 404, Headers: map[string]string{"contentType": "application/json", "messageId": id}}); err != nil {

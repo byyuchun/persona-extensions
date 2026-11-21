@@ -48,6 +48,10 @@ type Fake struct {
 	Limit int
 	// RefuseAfter refuses every send (HTTP 400) once this many were delivered (0: never).
 	RefuseAfter int
+	// ExpireToken answers this many more sends with HTTP 401, as DingTalk does for a token it revoked early.
+	ExpireToken int
+	// EndpointHost, when set, is the host the Stream endpoint is given on.
+	EndpointHost string
 	// PlainDownloads gives download addresses as http (as DingTalk does for its OSS buckets).
 	PlainDownloads bool
 	tokens         int
@@ -130,7 +134,13 @@ func (f *Fake) open(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.opens++
 	f.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]string{"endpoint": "wss://" + r.Host + "/connect", "ticket": ticket})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	host := r.Host
+	if f.EndpointHost != "" {
+		host = f.EndpointHost
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"endpoint": "wss://" + host + "/connect", "ticket": ticket})
 }
 
 func (f *Fake) connect(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +189,11 @@ func (f *Fake) send(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	if f.Fail != 0 {
 		writeJSON(w, f.Fail, map[string]string{"code": "ServiceUnavailable"})
+		return
+	}
+	if f.ExpireToken > 0 {
+		f.ExpireToken--
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "InvalidAuthentication", "message": "token expired"})
 		return
 	}
 	if f.RefuseAfter > 0 && len(f.sent) >= f.RefuseAfter {

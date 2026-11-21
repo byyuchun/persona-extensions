@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,11 +116,13 @@ func TestStreamAnswersPingsAndCallbacksInOrder(t *testing.T) {
 	got := make(chan string, 10)
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Stream(ctx, []string{api.BotTopic}, nil, func(_ context.Context, fr api.Frame) bool {
+		done <- c.Stream(ctx, []string{api.BotTopic}, nil, func(_ context.Context, fr api.Frame, settle func()) {
 			var m api.Message
 			_ = json.Unmarshal([]byte(fr.Data), &m)
 			got <- m.ID
-			return m.ID != "refused"
+			if m.ID != "refused" {
+				go settle() // answered later, from another goroutine
+			}
 		})
 	}()
 	f.WaitConnected(t)
@@ -146,7 +151,7 @@ func TestStreamAnswersPingsAndCallbacksInOrder(t *testing.T) {
 		}
 	}
 	if a := f.AckOf("f3"); a != nil {
-		t.Errorf("a refused callback was answered: %v", a)
+		t.Errorf("a callback never settled was answered: %v", a)
 	}
 	if a := f.AckOf("e1"); a["code"] != float64(404) {
 		t.Errorf("an unknown frame: %v", a)
@@ -188,5 +193,86 @@ func TestMessageParts(t *testing.T) {
 	_ = json.Unmarshal([]byte(`{"msgId":"f","msgtype":"file","content":{"downloadCode":"f1","fileName":"report.pdf"}}`), &m)
 	if p := m.Parts(); len(p) != 1 || p[0].FileName != "report.pdf" || p[0].DownloadCode != "f1" {
 		t.Fatalf("file: %+v", p)
+	}
+}
+
+// The established Stream connection outlives the dial's context (it bounds the handshake only): frames still arrive
+// well after DialTimeout (raised in review of #311/#314).
+func TestStreamOutlivesTheDialTimeout(t *testing.T) {
+	f := apitest.New(t)
+	c, err := api.New(api.Options{ClientID: apitest.ClientID, ClientSecret: apitest.ClientSecret, BaseURL: f.URL(), HTTP: f.Client(),
+		DialTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan string, 1)
+	go func() {
+		_ = c.Stream(ctx, []string{api.BotTopic}, nil, func(_ context.Context, fr api.Frame, settle func()) {
+			got <- fr.Headers["messageId"]
+			settle()
+		})
+	}()
+	f.WaitConnected(t)
+	time.Sleep(500 * time.Millisecond) // five dial timeouts
+	f.PushMessage(t, "late", map[string]any{"msgId": "m", "msgtype": "text", "text": map[string]string{"content": "x"}})
+	select {
+	case id := <-got:
+		if id != "late" {
+			t.Fatalf("got %s", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection did not outlive the dial timeout")
+	}
+	apitest.Eventually(t, "the answer", func() bool { return f.AckOf("late") != nil })
+}
+
+func TestStreamEndpointMustBeDingTalks(t *testing.T) {
+	f := apitest.New(t)
+	f.EndpointHost = "example.com"
+	if err := client(t, f, apitest.ClientSecret).Stream(context.Background(), []string{api.BotTopic}, nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "unexpected host") {
+		t.Fatalf("an endpoint on another host: %v", err)
+	}
+}
+
+// A token DingTalk revoked before its local expiry is fetched again once, and the call goes through.
+func TestRevokedTokenIsRenewedOnce(t *testing.T) {
+	f := apitest.New(t)
+	c := client(t, f, apitest.ClientSecret)
+	if _, err := c.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.ExpireToken = 1
+	if err := c.SendMarkdown(context.Background(), "staff-1", "t", "x"); err != nil {
+		t.Fatalf("after a revoked token: %v", err)
+	}
+	if n := len(f.Sent()); n != 1 {
+		t.Fatalf("delivered %d times", n)
+	}
+	f.ExpireToken = 2
+	var e *api.Error
+	if err := c.SendMarkdown(context.Background(), "staff-1", "t", "x"); !errors.As(err, &e) || e.Status != 401 {
+		t.Fatalf("a token refused twice: %v", err)
+	}
+}
+
+func TestSendOutcomes(t *testing.T) {
+	notSent := &api.Error{Status: 503, Code: "ServiceUnavailable"}
+	bare := &api.Error{Status: 502}
+	if !api.NotSent(notSent) || api.NotSent(bare) || !api.NotSent(&api.Error{Status: 429}) || api.NotSent(io.ErrUnexpectedEOF) {
+		t.Error("NotSent changed")
+	}
+	if !api.Refused(&api.Error{Status: 400}) || api.Refused(&api.Error{Status: 429}) || api.Refused(bare) {
+		t.Error("Refused changed")
+	}
+}
+
+func TestRedactKeepsURLsOutOfLogs(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://bucket.oss-cn-shenzhen.aliyuncs.com/x?Signature=secret&OSSAccessKeyId=key", Err: io.ErrUnexpectedEOF}
+	got := api.Redact(err)
+	if strings.Contains(got, "secret") || strings.Contains(got, "key") || !strings.Contains(got, "aliyuncs.com") {
+		t.Fatalf("redacted: %q", got)
 	}
 }

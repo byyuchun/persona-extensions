@@ -77,3 +77,38 @@ func TestPartlySentMessageIsNotSentAgain(t *testing.T) {
 		t.Fatalf("pieces delivered: %d after the retry, %d before (want 1)", got, n)
 	}
 }
+
+// DingTalk answering a server error with its own code did not take the message: the ref stays retryable.
+func TestServerErrorWithACodeIsRetryable(t *testing.T) {
+	sendRetryWait = time.Millisecond
+	defer func() { sendRetryWait = time.Second }()
+	r := newRig(t, nil)
+	r.pair()
+	p := &program{bot: r.bot}
+	r.f.Fail = 503
+	if err := r.send(p, "ref-5", "hello"); err == nil || err.Error() != msg("chat.send_failed") {
+		t.Fatalf("a 503: %v", err)
+	}
+	r.f.Fail = 0
+	if err := r.send(p, "ref-5", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(r.f.Sent()); got != 1 {
+		t.Fatalf("delivered %d times, want 1", got)
+	}
+}
+
+// channel.send with no text is not reported as delivered (review of #311).
+func TestEmptySendIsNotDelivered(t *testing.T) {
+	r := newRig(t, nil)
+	r.pair()
+	p := &program{bot: r.bot}
+	for _, text := range []string{"", "  \n\t "} {
+		if err := r.send(p, "ref-e"+text, text); err == nil {
+			t.Errorf("%q was taken as sent", text)
+		}
+	}
+	if n := len(r.f.Sent()); n != 0 {
+		t.Fatalf("sent %d messages", n)
+	}
+}

@@ -14,6 +14,7 @@
   "dingtalk.not_paired": "还没有配对：请重新绑定，并在钉钉里把配对码发给机器人",
   "dingtalk.refused": "钉钉拒绝了应用凭证：{error}",
   "dingtalk.retrying": "连不上钉钉，正在重试：{error}",
+  "dingtalk.unreadable": "保存的绑定已损坏，请重新绑定或退出登录",
   "dingtalk.via": "钉钉应用机器人（Stream 模式）",
   "guide.bind": "在这里填入应用的 Client ID 和 Client Secret，然后在单聊里把配对码发给机器人。",
   "guide.create_app": "在钉钉开发者后台为你的组织创建一个企业内部应用。",

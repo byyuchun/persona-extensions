@@ -319,17 +319,49 @@ func TestMediaIsHandedOver(t *testing.T) {
 	}
 }
 
-func TestHubFailureIsToldInTheChat(t *testing.T) {
+// A message the hub fails to take is neither marked seen nor answered on the Stream, so DingTalk's redelivery reaches
+// the hub once it is back; the owner is told once (review of #311).
+func TestHubFailureLeavesTheMessageForRedelivery(t *testing.T) {
 	r := newRig(t, nil)
 	r.pair()
 	r.hub.mu.Lock()
 	r.hub.fail = true
 	r.hub.mu.Unlock()
 	n := len(r.f.Replies())
-	r.f.PushMessage(t, "hf", dm("hf", ownerID, ownerNick, "are you there", r.f))
+	r.f.PushMessage(t, "hf1", dm("hf", ownerID, ownerNick, "are you there", r.f))
 	apitest.Eventually(t, "the hub error reply", func() bool { return len(r.f.Replies()) == n+1 })
 	if got := r.f.Replies(); got[n] != msg("chat.hub_error") {
 		t.Fatalf("replied %q", got[n])
+	}
+	r.f.PushMessage(t, "hf2", dm("hf", ownerID, ownerNick, "are you there", r.f)) // DingTalk delivers it again
+	time.Sleep(100 * time.Millisecond)
+	if r.f.AckOf("hf1") != nil || r.f.AckOf("hf2") != nil || len(r.f.Replies()) != n+1 {
+		t.Fatalf("a message the hub did not take was answered, or the owner told twice: %q", r.f.Replies())
+	}
+	r.hub.mu.Lock()
+	r.hub.fail = false
+	r.hub.mu.Unlock()
+	r.f.PushMessage(t, "hf3", dm("hf", ownerID, ownerNick, "are you there", r.f))
+	apitest.Eventually(t, "the message at the hub", func() bool { return len(r.hub.messages()) == 1 })
+	apitest.Eventually(t, "the answer", func() bool { return r.f.AckOf("hf3") != nil })
+	r.f.PushMessage(t, "hf4", dm("hf", ownerID, ownerNick, "are you there", r.f)) // and a late copy is a duplicate
+	apitest.Eventually(t, "the duplicate's answer", func() bool { return r.f.AckOf("hf4") != nil })
+	if len(r.hub.messages()) != 1 {
+		t.Fatal("the message reached the hub twice")
+	}
+}
+
+// A stored state that does not read is reported and never overwritten by accident; binding again replaces it.
+func TestUnreadableStateIsKept(t *testing.T) {
+	secrets := &memSecrets{data: []byte("{not json")}
+	r := newRig(t, secrets)
+	apitest.Eventually(t, "the status", func() bool { return r.bot.Status(context.Background()).State == wire.ConnectorStateError })
+	if string(secrets.data) != "{not json" {
+		t.Fatal("the stored state was overwritten")
+	}
+	r.pair()
+	if !strings.Contains(string(secrets.data), apitest.ClientID) {
+		t.Fatal("binding again did not replace it")
 	}
 }
 
@@ -372,6 +404,26 @@ func TestLogoutForgetsEverything(t *testing.T) {
 	}
 	if _, err := r.bot.Send(context.Background(), wire.ChannelSendParams{Ref: "x", Text: "x"}); !errors.Is(err, errCannotSend) {
 		t.Errorf("send after logout: %v", err)
+	}
+}
+
+// Chunk keeps every character but newlines at a cut, in order, and never gives an empty piece, even for long runs of
+// blank lines around the cut (review of #311).
+func TestChunkKeepsTextAndSkipsEmptyPieces(t *testing.T) {
+	for _, text := range []string{
+		strings.Repeat("\n", 25) + "tail",
+		strings.Repeat("a", 7) + strings.Repeat("\n", 30) + "b" + strings.Repeat("\n", 9) + "c",
+		strings.Repeat("ab\n\n\n", 20),
+	} {
+		pieces := Chunk(text, 10)
+		for _, p := range pieces {
+			if p == "" || len([]rune(p)) > 10 {
+				t.Fatalf("Chunk(%q) gave piece %q", text, p)
+			}
+		}
+		if got, want := strings.ReplaceAll(strings.Join(pieces, ""), "\n", ""), strings.ReplaceAll(text, "\n", ""); got != want {
+			t.Fatalf("Chunk(%q) kept %q, want %q", text, got, want)
+		}
 	}
 }
 

@@ -70,6 +70,10 @@ type Bot struct {
 	restart context.CancelFunc // ends the connection of the credentials it serves (they changed)
 	replied map[string]time.Time
 	queue   chan queued
+	// hubErrorTold are the owner's messages the hub failed to take that the owner was already told about.
+	hubErrorTold map[string]bool
+	// unreadable: the sealed state did not read; nothing is saved over it until the user binds again or signs out.
+	unreadable bool
 }
 
 // state is what is kept in the hub (sealed): never logged.
@@ -90,8 +94,9 @@ type owner struct {
 
 // queued is a message the Stream took, waiting for its turn.
 type queued struct {
-	c *api.Client
-	m api.Message
+	c    *api.Client
+	m    api.Message
+	done func() // answers its Stream frame
 }
 
 // queueMost is how many taken messages wait at once; more are left unanswered, so DingTalk delivers them again.
@@ -110,7 +115,7 @@ func New(opt Options, secrets Secrets) *Bot {
 		opt.Code = randomCode
 	}
 	return &Bot{opt: opt, secrets: secrets, wake: make(chan struct{}, 1), replied: map[string]time.Time{},
-		queue: make(chan queued, queueMost)}
+		queue: make(chan queued, queueMost), hubErrorTold: map[string]bool{}}
 }
 
 // lang is the language of what the robot writes for people.
@@ -125,6 +130,8 @@ func (b *Bot) Status(context.Context) wire.ConnectorStatus {
 	switch {
 	case !b.loaded && b.problem != "":
 		s.State, s.Error = wire.ConnectorStateError, b.problem
+	case b.unreadable:
+		s.State, s.Error = wire.ConnectorStateError, t(l, "dingtalk.cannot_load", "error", t(l, "dingtalk.unreadable"))
 	case b.st.ClientID == "":
 		s.State, s.Error = wire.ConnectorStateNotSignedIn, t(l, "dingtalk.not_configured")
 		s.Guide = []string{t(l, "guide.create_app"), t(l, "guide.robot"), t(l, "guide.bind")}
@@ -164,22 +171,26 @@ func (b *Bot) load(ctx context.Context) error {
 		return err
 	}
 	var st state
+	unreadable := false
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &st); err != nil {
-			log.Printf("dingtalk: the stored state does not read, starting over: %v", err)
-			st = state{}
+			log.Printf("dingtalk: the stored state does not read; keeping it until bound again: %v", err)
+			st, unreadable = state{}, true
 		}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.loaded {
-		b.st, b.loaded, b.problem = st, true, ""
+		b.st, b.loaded, b.problem, b.unreadable = st, true, "", unreadable
 	}
 	return nil
 }
 
-// saveLocked stores the state; b.mu is held.
+// saveLocked stores the state; b.mu is held. A stored state that did not read is never overwritten by accident.
 func (b *Bot) saveLocked(ctx context.Context) {
+	if b.unreadable {
+		return
+	}
 	data, err := json.Marshal(b.st)
 	if err == nil {
 		err = b.secrets.Save(ctx, data)
@@ -247,6 +258,7 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 	b.mu.Lock()
 	if b.st.ClientID != id || b.st.ClientSecret != secret {
 		b.mu.Unlock()
+		b.kick() // the credentials changed under it: Run starts over with the new ones
 		return
 	}
 	b.restart = cancel
@@ -274,7 +286,7 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 			b.live, b.problem = true, ""
 			b.mu.Unlock()
 			failures = 0
-		}, func(_ context.Context, f api.Frame) bool { return b.take(c, f) })
+		}, func(_ context.Context, f api.Frame, done func()) { b.take(c, f, done) })
 		b.mu.Lock()
 		b.live = false
 		b.mu.Unlock()
@@ -299,28 +311,31 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 	}
 }
 
-// take queues a message the Stream brought; false (not answered, delivered again) when the queue is full.
-func (b *Bot) take(c *api.Client, f api.Frame) bool {
+// take queues a message the Stream brought; one that does not fit in the queue is left unanswered, so DingTalk
+// delivers it again.
+func (b *Bot) take(c *api.Client, f api.Frame, done func()) {
 	var m api.Message
 	if err := json.Unmarshal([]byte(f.Data), &m); err != nil || m.ID == "" {
-		return true // nothing it can read: taken, so it is not delivered again
+		done() // nothing it can read: answered, so it is not delivered again
+		return
 	}
 	select {
-	case b.queue <- queued{c: c, m: m}:
-		return true
+	case b.queue <- queued{c: c, m: m, done: done}:
 	default:
-		return false
 	}
 }
 
-// work handles the taken messages one at a time, in the order they came.
+// work handles the taken messages one at a time, in the order they came, answering each frame once it is settled.
+// Messages still queued when it stops are never answered, and DingTalk delivers them again.
 func (b *Bot) work(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case q := <-b.queue:
-			b.handle(ctx, q.c, q.m)
+			if b.handle(ctx, q.c, q.m) {
+				q.done()
+			}
 		}
 	}
 }
