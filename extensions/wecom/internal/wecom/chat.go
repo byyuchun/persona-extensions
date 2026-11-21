@@ -46,18 +46,21 @@ func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
 		b.mu.Unlock()
 		return
 	}
-	b.st.Seen = append(b.st.Seen, m.ID)
-	if len(b.st.Seen) > maxSeen {
-		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
-	}
 	o := b.st.Owner
 	if o != nil && m.From.UserID == o.UserID {
+		b.mu.Unlock()
+		// counted as seen only once the hub took it, so a copy WeCom delivers again is not dropped
+		if !b.forward(ctx, c, m) {
+			return
+		}
+		b.mu.Lock()
+		b.markSeenLocked(m.ID)
 		b.last = b.opt.Now()
 		b.saveLocked(ctx)
 		b.mu.Unlock()
-		b.forward(ctx, c, m)
 		return
 	}
+	b.markSeenLocked(m.ID)
 	reply, handled := b.tryPairLocked(ctx, m.From.UserID, m.PlainText())
 	b.saveLocked(ctx)
 	b.mu.Unlock()
@@ -68,20 +71,38 @@ func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
 	b.stranger(ctx, m.From.UserID, o == nil)
 }
 
-// forward hands the owner's message to the hub.
-func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) {
-	msg := b.compose(ctx, c, m)
-	if empty(msg) {
-		return
+// markSeenLocked records id among the latest messages handled; b.mu is held.
+func (b *Bot) markSeenLocked(id string) {
+	b.st.Seen = append(b.st.Seen, id)
+	if len(b.st.Seen) > maxSeen {
+		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
 	}
-	if b.opt.Hub == nil {
-		log.Printf("wecom: no hub to hand the message to")
-		return
+}
+
+// forward hands the owner's message to the hub and says whether the hub took it. When it did not, the owner hears so
+// once per message.
+func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) bool {
+	msg := b.compose(ctx, c, m)
+	if empty(msg) || b.opt.Hub == nil {
+		return true
 	}
 	if err := b.opt.Hub.Receive(ctx, msg); err != nil {
 		log.Printf("wecom: handing a message to the hub: %v", err)
-		b.tell(ctx, m.From.UserID, t(b.lang(), "chat.hub_error"))
+		b.mu.Lock()
+		told := b.hubErrorTold[m.ID]
+		if !told {
+			if len(b.hubErrorTold) >= maxSeen {
+				clear(b.hubErrorTold)
+			}
+			b.hubErrorTold[m.ID] = true
+		}
+		b.mu.Unlock()
+		if !told {
+			b.tell(ctx, m.From.UserID, t(b.lang(), "chat.hub_error"))
+		}
+		return false
 	}
+	return true
 }
 
 // stranger: the robot only serves the person who paired it; anyone else hears so (or how to pair, before anyone
@@ -130,9 +151,13 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 	if s == nil || o == nil {
 		return wire.ChannelSendResult{}, errCannotSend
 	}
+	pieces := Chunk(strings.TrimSpace(p.Text), MaxText)
+	if len(pieces) == 0 {
+		return wire.ChannelSendResult{}, errNothingToSend // never reported as delivered
+	}
 	// nothing is sent again here: WeCom keeps no idempotency key, and a send whose answer did not come back may
 	// already be in the owner's chat
-	for i, part := range Chunk(strings.TrimSpace(p.Text), MaxText) {
+	for i, part := range pieces {
 		err := s.SendMarkdown(ctx, o.UserID, part)
 		var e *api.Error
 		switch {
@@ -147,6 +172,9 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 	}
 	return wire.ChannelSendResult{}, nil
 }
+
+// errNothingToSend: channel.send with no text; nothing was delivered.
+var errNothingToSend = errors.New("nothing to send: the message has no text")
 
 // sendFailed: WeCom did not take the message (logged by the hub, which sends it again with the same ref).
 type sendFailed struct{ lang string }
@@ -206,7 +234,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, "一张太大的图片") // i18n-ignore: what the assistant reads
 			case err != nil:
-				log.Printf("wecom: downloading a picture: %v", err)
+				log.Printf("wecom: downloading a picture: %s", api.Redact(err))
 				out.Unsupported = append(out.Unsupported, "一张没下载下来的图片") // i18n-ignore: what the assistant reads
 			default:
 				left -= int64(len(data))
@@ -229,7 +257,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			case errors.Is(err, api.ErrTooLarge):
 				out.Unsupported = append(out.Unsupported, fileLabel(name)+"（超过 50 MB）") // i18n-ignore: what the assistant reads
 			case err != nil:
-				log.Printf("wecom: downloading a file: %v", err)
+				log.Printf("wecom: downloading a file: %s", api.Redact(err))
 				out.Unsupported = append(out.Unsupported, "没下载下来的"+fileLabel(name)) // i18n-ignore: what the assistant reads
 			default:
 				if name == "" {
@@ -309,7 +337,11 @@ func Chunk(text string, most int) []string {
 				break
 			}
 		}
-		out = append(out, strings.TrimRight(string(r[:cut]), "\n"))
+		// only newlines are trimmed at a cut, and a piece of nothing but newlines is skipped: every other
+		// character is kept, in order, and no empty piece is sent
+		if piece := strings.TrimRight(string(r[:cut]), "\n"); piece != "" {
+			out = append(out, piece)
+		}
 		text = strings.TrimLeft(string(r[cut:]), "\n")
 	}
 	if text != "" {

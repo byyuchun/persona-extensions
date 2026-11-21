@@ -26,5 +26,6 @@
   "wecom.not_paired": "还没有配对：请重新绑定，并在企业微信里把配对码发给机器人",
   "wecom.refused": "企业微信拒绝了机器人凭证：{error}",
   "wecom.retrying": "连不上企业微信，正在重试：{error}",
+  "wecom.unreadable": "保存的绑定已损坏，请重新绑定或退出登录",
   "wecom.via": "企业微信智能机器人（长连接）"
 }

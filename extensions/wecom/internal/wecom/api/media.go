@@ -32,7 +32,7 @@ var ErrTooLarge = errors.New("too large")
 // the file's name as the download gives it (Content-Disposition): a file message carries none of its own.
 func (c *Client) Download(ctx context.Context, rawURL, aesKey string, most int64) ([]byte, string, error) {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" || u.Scheme != "https" && u.Scheme != "http" {
+	if err != nil || u.Host == "" || u.User != nil || u.Scheme != "https" && u.Scheme != "http" {
 		return nil, "", errors.New("WeCom gave no download address")
 	}
 	if !hostAllowed(u.Hostname(), c.opt.MediaHosts) {
@@ -49,7 +49,7 @@ func (c *Client) Download(ctx context.Context, rawURL, aesKey string, most int64
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := c.opt.HTTP.Do(req)
+	resp, err := c.mediaClient().Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -101,6 +101,37 @@ func fileName(disposition string) string {
 		}
 		return r
 	}, name)
+}
+
+// mediaClient is the HTTP client for media: every redirect must stay on HTTPS and on the media hosts.
+func (c *Client) mediaClient() *http.Client {
+	hc := *c.opt.HTTP
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("WeCom's media redirected too many times")
+		}
+		if req.URL.Scheme != "https" || req.URL.User != nil || !hostAllowed(req.URL.Hostname(), c.opt.MediaHosts) {
+			return fmt.Errorf("WeCom's media redirected to an unexpected place %q", req.URL.Hostname())
+		}
+		return nil
+	}
+	return &hc
+}
+
+// Redact is err for a log line without a request's URL: media addresses carry signed queries.
+func Redact(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		host := ""
+		if u, perr := url.Parse(ue.URL); perr == nil {
+			host = u.Hostname()
+		}
+		return fmt.Sprintf("%s %s: %v", ue.Op, host, ue.Err)
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // mediaKey is the 32-byte key an aeskey stands for: base64 (WeCom's keys are 43 characters without the padding).

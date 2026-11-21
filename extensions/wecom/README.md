@@ -27,6 +27,7 @@ Only the owner's messages reach Persona. Before pairing, the robot tells others 
 ## Messages
 
 - **In**: text, mixed messages (text and pictures), up to 4 pictures of 3 MB each, files up to 50 MB (WeCom allows 20 MB), at most 40 MB of pictures and files in one message (the hub's own total, which also keeps the base64 `channel.receive` frame under the extension protocol's 64 MiB line), voice as WeCom's transcript, and the text of a quoted message. Media come as a URL valid for five minutes and a per-message AES key; the extension downloads them over HTTPS and decrypts them (AES-256-CBC). A file message carries no name: it is taken from the download's `Content-Disposition`. Videos, and anything too large or not downloadable, are named for the assistant instead. Conversation routing, `/new`, `/stop`, questions and turn handling belong to the hub's channel pipeline ([Persona's channel documentation](https://github.com/nwverse/persona/blob/main/docs/extensions/channels.md)).
+- **Delivery**: a message counts as handled only once the hub took it. When the hub cannot take it (restarting, say), the owner hears so once, and a copy WeCom delivers again is tried again rather than dropped as a duplicate.
 - **Out**: Markdown, sent to the owner with `aibot_send_msg`, in pieces of at most 4,000 characters (WeCom takes 20,480 bytes). WeCom allows it only after the owner has written to the robot, at most 30 messages a minute per chat, and keeps no idempotency key, so the extension sends each hub `ref` once and never sends a piece again by itself. A refusal (an errcode) or a request that never left lets the hub try the `ref` again. When the request went out but WeCom's acknowledgement did not come back, or part of a long message was already delivered, the outcome is reported as uncertain and the ref is never sent again, so the owner never gets a duplicate.
 - **Questions and approvals** are answered in text (`asks: text`). Streaming replies, cards and buttons are not used yet.
 
@@ -34,7 +35,7 @@ Only the owner's messages reach Persona. Before pairing, the robot tells others 
 
 The BotID, Secret, the owner (the id WeCom gives the robot for them, and the pairing time) and the ids of recently handled messages are kept as the connector's encrypted secret in the hub's database. They are never stored in the extension directory, logs or status. Signing out deletes all of it and closes the connection. Message contents and secrets are not logged.
 
-The network grants are `*.qq.com` (the long connection), `*.myqcloud.com` (Tencent Cloud object storage, where WeCom keeps message pictures and files) and `*.qpic.cn` (another Tencent media host). Media are fetched over HTTPS only from those hosts.
+The network grants are `*.qq.com` (the long connection), `*.myqcloud.com` (Tencent Cloud object storage, where WeCom keeps message pictures and files) and `*.qpic.cn` (another Tencent media host). Media are fetched over HTTPS only from those hosts, and a redirect is followed only when it stays on HTTPS and those hosts. Signed media addresses are kept out of logs.
 
 ## Development
 

@@ -26,5 +26,6 @@
   "wecom.not_paired": "まだペアリングされていません。連携をやり直し、WeCom でロボットにコードを送ってください",
   "wecom.refused": "WeCom がロボットの認証情報を拒否しました：{error}",
   "wecom.retrying": "WeCom に接続できません。再試行しています：{error}",
+  "wecom.unreadable": "保存された連携が壊れています。連携し直すかサインアウトしてください",
   "wecom.via": "WeCom スマートロボット（長期接続）"
 }

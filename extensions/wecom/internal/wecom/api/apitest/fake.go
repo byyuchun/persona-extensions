@@ -57,6 +57,9 @@ func New(t testing.TB) *Fake {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", f.connect)
 	mux.HandleFunc("GET /media/{name}", f.file)
+	mux.HandleFunc("GET /redirect", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
+	})
 	f.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(func() {
 		f.mu.Lock()

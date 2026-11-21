@@ -56,6 +56,8 @@ type Options struct {
 	// HTTP makes the WebSocket dial and media downloads (its transport, so HTTPS_PROXY is used, when nil). It must
 	// have no Timeout: the WebSocket dial refuses one.
 	HTTP *http.Client
+	// DialTimeout bounds connecting and subscribing (dialTimeout when 0); tests shorten it.
+	DialTimeout time.Duration
 	// AnswerWait is how long a request waits for WeCom's answer (answerWait when 0); tests shorten it.
 	AnswerWait time.Duration
 	// MediaHosts are the hosts media may be downloaded from (a host or "*.suffix"); the defaults when empty.
@@ -78,6 +80,9 @@ func New(opt Options) (*Client, error) {
 	}
 	if opt.HTTP == nil {
 		opt.HTTP = &http.Client{}
+	}
+	if opt.DialTimeout <= 0 {
+		opt.DialTimeout = dialTimeout
 	}
 	if opt.AnswerWait <= 0 {
 		opt.AnswerWait = answerWait
@@ -165,7 +170,7 @@ func (s *Session) request(ctx context.Context, cmd string, body any) error {
 	s.mu.Lock()
 	if s.waiting == nil {
 		s.mu.Unlock()
-		return errors.New("the WeCom connection is closed")
+		return fmt.Errorf("%w: the WeCom connection is closed", ErrNotSent)
 	}
 	s.waiting[id] = ch
 	s.mu.Unlock()
@@ -180,7 +185,8 @@ func (s *Session) request(ctx context.Context, cmd string, body any) error {
 		raw = nil
 	}
 	if err := s.write(ctx, Frame{Cmd: cmd, Headers: map[string]string{"req_id": id}, Body: raw}); err != nil {
-		return fmt.Errorf("%w: writing to WeCom: %w", ErrNotSent, err)
+		// a failed write may still have put the frame on the wire: unknown, never sent again
+		return fmt.Errorf("%w: writing to WeCom: %w", ErrNoAnswer, err)
 	}
 	t := time.NewTimer(s.wait)
 	defer t.Stop()
@@ -242,7 +248,8 @@ func (c *Client) Subscribe(ctx context.Context) error {
 
 // open dials and subscribes, reading only until the subscription is answered.
 func (c *Client) open(ctx context.Context) (*Session, error) {
-	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	// the dial's context bounds the handshake and the subscription only: the established connection outlives it
+	dctx, cancel := context.WithTimeout(ctx, c.opt.DialTimeout)
 	defer cancel()
 	base := c.opt.HTTP.Transport
 	if base == nil {
@@ -363,6 +370,15 @@ func (w wsCasing) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return w.rt.RoundTrip(r)
+}
+
+// ErrText is err for people: WeCom's own refusal as its trimmed errmsg, anything else as its text.
+func ErrText(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return fmt.Sprintf("%d %s", e.Code, e.Message)
+	}
+	return Redact(err)
 }
 
 // errText is WeCom's errmsg for people: what comes before its ", hint: [...] from ip: ..." tail (the hint is a

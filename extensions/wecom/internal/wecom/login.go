@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nwverse/persona-extensions/extensions/wecom/internal/wecom/api"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
 
@@ -50,14 +51,23 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		if id == "" || secret == "" {
 			return credsPrompt(l, t(l, "login.creds_missing")), nil
 		}
+		// WeCom keeps one connection per robot: the check must not compete with the robot's own connection (it
+		// would close it), so that one is ended first and started again after the check
+		b.pause()
 		c, err := b.opt.NewClient(id, secret)
 		if err == nil {
-			err = c.Subscribe(ctx) // takes the robot over from a connection it may hold; it connects again below
+			err = c.Subscribe(ctx)
 		}
 		if err != nil {
-			return credsPrompt(l, t(l, "login.creds_refused", "error", err.Error())), nil
+			b.mu.Lock()
+			b.paused = false
+			b.mu.Unlock()
+			b.kick()
+			return credsPrompt(l, t(l, "login.creds_refused", "error", api.ErrText(err))), nil
 		}
 		b.mu.Lock()
+		b.paused = false
+		b.unreadable = false // binding again replaces a stored state that did not read
 		if b.st.BotID != id {
 			b.st.Seen = nil
 		}
@@ -82,6 +92,24 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		return b.pairing.prompt(l), nil
 	}
 	return credsPrompt(l, ""), nil
+}
+
+// pause ends the robot's connection, if any, and holds Run back until paused is cleared.
+func (b *Bot) pause() {
+	b.mu.Lock()
+	b.paused = true
+	restart, serving := b.restart, b.serving
+	b.restart = nil
+	b.mu.Unlock()
+	if restart != nil {
+		restart()
+	}
+	if serving != nil {
+		select {
+		case <-serving:
+		case <-time.After(10 * time.Second):
+		}
+	}
 }
 
 func credsPrompt(l, errText string) wire.ConnectorPrompt {
@@ -146,7 +174,7 @@ func (b *Bot) Logout(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.st, b.pairing, b.problem = state{}, nil, ""
+	b.st, b.pairing, b.problem, b.unreadable = state{}, nil, "", false
 	b.reconnectLocked()
 	return b.secrets.Delete(ctx)
 }

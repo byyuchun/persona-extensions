@@ -72,6 +72,14 @@ type Bot struct {
 	restart context.CancelFunc // ends the connection of the credentials it serves (they changed)
 	replied map[string]time.Time
 	queue   chan queued
+	// paused holds Run back while binding checks new credentials, so the check is the robot's only subscriber.
+	paused bool
+	// serving is closed when the current serve returns (nil while none runs).
+	serving chan struct{}
+	// hubErrorTold are the owner's messages the hub failed to take that the owner was already told about.
+	hubErrorTold map[string]bool
+	// unreadable: the sealed state did not read; nothing is saved over it until the user binds again or signs out.
+	unreadable bool
 }
 
 // state is what is kept in the hub (sealed): never logged.
@@ -115,7 +123,7 @@ func New(opt Options, secrets Secrets) *Bot {
 		opt.KickedWait = 30 * time.Minute
 	}
 	return &Bot{opt: opt, secrets: secrets, wake: make(chan struct{}, 1), replied: map[string]time.Time{},
-		queue: make(chan queued, queueMost)}
+		queue: make(chan queued, queueMost), hubErrorTold: map[string]bool{}}
 }
 
 // lang is the language of what the robot writes for people.
@@ -130,6 +138,8 @@ func (b *Bot) Status(context.Context) wire.ConnectorStatus {
 	switch {
 	case !b.loaded && b.problem != "":
 		s.State, s.Error = wire.ConnectorStateError, b.problem
+	case b.unreadable:
+		s.State, s.Error = wire.ConnectorStateError, t(l, "wecom.cannot_load", "error", t(l, "wecom.unreadable"))
 	case b.st.BotID == "":
 		s.State, s.Error = wire.ConnectorStateNotSignedIn, t(l, "wecom.not_configured")
 		s.Guide = []string{t(l, "guide.create_robot"), t(l, "guide.long_connection"), t(l, "guide.bind")}
@@ -161,22 +171,26 @@ func (b *Bot) load(ctx context.Context) error {
 		return err
 	}
 	var st state
+	unreadable := false
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &st); err != nil {
-			log.Printf("wecom: the stored state does not read, starting over: %v", err)
-			st = state{}
+			log.Printf("wecom: the stored state does not read; keeping it until bound again: %v", err)
+			st, unreadable = state{}, true
 		}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.loaded {
-		b.st, b.loaded, b.problem = st, true, ""
+		b.st, b.loaded, b.problem, b.unreadable = st, true, "", unreadable
 	}
 	return nil
 }
 
-// saveLocked stores the state; b.mu is held.
+// saveLocked stores the state; b.mu is held. A stored state that did not read is never overwritten by accident.
 func (b *Bot) saveLocked(ctx context.Context) {
+	if b.unreadable {
+		return
+	}
 	data, err := json.Marshal(b.st)
 	if err == nil {
 		err = b.secrets.Save(ctx, data)
@@ -220,9 +234,9 @@ func (b *Bot) Run(ctx context.Context) {
 	go b.work(ctx)
 	for ctx.Err() == nil {
 		b.mu.Lock()
-		id, secret := b.st.BotID, b.st.Secret
+		id, secret, paused := b.st.BotID, b.st.Secret, b.paused
 		b.mu.Unlock()
-		if id == "" {
+		if id == "" || paused {
 			select {
 			case <-ctx.Done():
 				return
@@ -240,12 +254,16 @@ var backoff = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second, 30
 func (b *Bot) serve(parent context.Context, id, secret string) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
 	c, err := b.opt.NewClient(id, secret)
 	b.mu.Lock()
-	if b.st.BotID != id || b.st.Secret != secret {
+	if b.st.BotID != id || b.st.Secret != secret || b.paused {
 		b.mu.Unlock()
+		b.kick() // the credentials changed under it: Run starts over with the new ones
 		return
 	}
+	b.serving = done
 	b.restart = cancel
 	if err == nil {
 		b.client = c
@@ -287,7 +305,7 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 		}
 		failures++
 		b.mu.Lock()
-		b.problem = t(b.lang(), key, "error", err.Error())
+		b.problem = t(b.lang(), key, "error", api.ErrText(err))
 		b.mu.Unlock()
 		if !sleep(ctx, wait) {
 			return

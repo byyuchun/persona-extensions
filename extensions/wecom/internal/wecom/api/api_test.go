@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -164,5 +166,84 @@ func TestDecryptRoundTripAndPadding(t *testing.T) {
 	}
 	if _, err := api.Decrypt([]byte("not blocks"), key); err == nil {
 		t.Error("partial blocks decrypted")
+	}
+}
+
+// The established connection outlives the dial's context (it bounds the handshake and the subscription only): a
+// message still arrives and a send is answered well after DialTimeout (raised in review of #314).
+func TestConnectionOutlivesTheDialTimeout(t *testing.T) {
+	f := apitest.New(t)
+	o := f.Options(apitest.BotID, apitest.Secret)
+	o.DialTimeout = 100 * time.Millisecond
+	c, err := api.New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sessions := make(chan *api.Session, 1)
+	got := make(chan string, 1)
+	go func() {
+		_ = c.Run(ctx, func(s *api.Session) { sessions <- s }, func(fr api.Frame) {
+			m, _ := api.ParseMessage(fr.Body)
+			got <- m.ID
+		})
+	}()
+	f.WaitConnected(t)
+	s := <-sessions
+	time.Sleep(500 * time.Millisecond) // five dial timeouts
+	f.Text(t, "late", "user-1", "still there?")
+	select {
+	case id := <-got:
+		if id != "late" {
+			t.Fatalf("got %s", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection did not outlive the dial timeout")
+	}
+	if err := s.SendMarkdown(ctx, "user-1", "yes"); err != nil {
+		t.Fatalf("a send after the dial timeout: %v", err)
+	}
+}
+
+// A request on a closed session never left: it is ErrNotSent (retryable), not an unknown outcome.
+func TestRequestOnAClosedSessionIsNotSent(t *testing.T) {
+	f := apitest.New(t)
+	c := client(t, f, apitest.Secret)
+	ctx, cancel := context.WithCancel(context.Background())
+	sessions := make(chan *api.Session, 1)
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx, func(s *api.Session) { sessions <- s }, nil) }()
+	f.WaitConnected(t)
+	s := <-sessions
+	cancel()
+	<-done
+	err := s.SendMarkdown(context.Background(), "user-1", "x")
+	if !errors.Is(err, api.ErrNotSent) || errors.Is(err, api.ErrNoAnswer) {
+		t.Fatalf("a send on a closed session: %v", err)
+	}
+}
+
+// Media redirects must stay on HTTPS and the media hosts.
+func TestMediaRedirectsAreChecked(t *testing.T) {
+	f := apitest.New(t)
+	c := client(t, f, apitest.Secret)
+	plain := []byte("synthetic")
+	url, key := f.Media("pic", plain)
+	base := strings.Replace(url, "/media/pic", "", 1)
+	if data, _, err := c.Download(context.Background(), base+"/redirect?to=/media/pic", key, 1<<20); err != nil || !bytes.Equal(data, plain) {
+		t.Fatalf("a redirect on the same host: %q, %v", data, err)
+	}
+	for _, to := range []string{"https://example.com/x", "http://" + strings.TrimPrefix(strings.TrimPrefix(base, "http://"), "https://") + "/media/pic"} {
+		if _, _, err := c.Download(context.Background(), base+"/redirect?to="+to, key, 1<<20); err == nil {
+			t.Errorf("followed a redirect to %s", to)
+		}
+	}
+}
+
+func TestRedactKeepsURLsOutOfLogs(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://ww-aibot-img.cos.ap-guangzhou.myqcloud.com/x?sign=secret", Err: io.ErrUnexpectedEOF}
+	if got := api.Redact(err); strings.Contains(got, "secret") || !strings.Contains(got, "myqcloud.com") {
+		t.Fatalf("redacted: %q", got)
 	}
 }

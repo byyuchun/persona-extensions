@@ -302,6 +302,74 @@ func TestHubFailureIsToldInTheChat(t *testing.T) {
 	if s := r.sentTo(ownerID); s[n] != msg("chat.hub_error") {
 		t.Fatalf("answered %q", s[n])
 	}
+	// not counted as seen: a copy delivered again is tried again, the owner told only once (review of #314)
+	r.f.Text(t, "hf", ownerID, "are you there")
+	time.Sleep(100 * time.Millisecond)
+	if len(r.sentTo(ownerID)) != n+1 {
+		t.Fatalf("told twice: %q", r.sentTo(ownerID))
+	}
+	r.hub.mu.Lock()
+	r.hub.fail = false
+	r.hub.mu.Unlock()
+	r.f.Text(t, "hf", ownerID, "are you there")
+	apitest.Eventually(t, "the message at the hub", func() bool { return len(r.hub.messages()) == 1 })
+	r.f.Text(t, "hf", ownerID, "are you there") // and once taken, a copy is a duplicate
+	time.Sleep(100 * time.Millisecond)
+	if len(r.hub.messages()) != 1 {
+		t.Fatal("the message reached the hub twice")
+	}
+}
+
+// Binding again with the robot already connected does not end with the robot's own connection taken over: the
+// connection is ended before the check subscribes, then started again (review of #314).
+func TestBindingAgainDoesNotKickItself(t *testing.T) {
+	r := newRig(t)
+	r.pair()
+	if p := r.login(apitest.Secret); p.Kind != wire.ConnectorPromptKindDeviceCode {
+		t.Fatalf("binding again: %+v", p)
+	}
+	apitest.Eventually(t, "the connection again", func() bool {
+		r.bot.mu.Lock()
+		defer r.bot.mu.Unlock()
+		return r.bot.session != nil && r.bot.problem == ""
+	})
+	r.f.Text(t, "m-pair-2", ownerID, code)
+	apitest.Eventually(t, "the pairing again", func() bool {
+		return r.bot.Status(context.Background()).State == wire.ConnectorStateOk
+	})
+}
+
+// A stored state that does not read is reported and never overwritten by accident; binding again replaces it.
+func TestUnreadableStateIsKept(t *testing.T) {
+	r := &rig{t: t, f: apitest.New(t), hub: &memHub{}, secrets: &memSecrets{data: []byte("{not json")}, kicked: time.Hour}
+	r.start()
+	apitest.Eventually(t, "the status", func() bool { return r.bot.Status(context.Background()).State == wire.ConnectorStateError })
+	if string(r.secrets.data) != "{not json" {
+		t.Fatal("the stored state was overwritten")
+	}
+	r.pair()
+	if !strings.Contains(string(r.secrets.data), apitest.BotID) {
+		t.Fatal("binding again did not replace it")
+	}
+}
+
+// Chunk keeps every character but newlines at a cut, in order, and never gives an empty piece (review of #314).
+func TestChunkKeepsTextAndSkipsEmptyPieces(t *testing.T) {
+	for _, text := range []string{
+		strings.Repeat("\n", 25) + "tail",
+		strings.Repeat("a", 7) + strings.Repeat("\n", 30) + "b" + strings.Repeat("\n", 9) + "c",
+		strings.Repeat("ab\n\n\n", 20),
+	} {
+		pieces := Chunk(text, 10)
+		for _, p := range pieces {
+			if p == "" || len([]rune(p)) > 10 {
+				t.Fatalf("Chunk(%q) gave piece %q", text, p)
+			}
+		}
+		if got, want := strings.ReplaceAll(strings.Join(pieces, ""), "\n", ""), strings.ReplaceAll(text, "\n", ""); got != want {
+			t.Fatalf("Chunk(%q) kept %q, want %q", text, got, want)
+		}
+	}
 }
 
 func TestChunk(t *testing.T) {

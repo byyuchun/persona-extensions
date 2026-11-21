@@ -26,5 +26,6 @@
   "wecom.not_paired": "Not paired yet: bind again and send the code to the robot in WeCom",
   "wecom.refused": "WeCom refused the robot's credentials: {error}",
   "wecom.retrying": "Can't reach WeCom, retrying: {error}",
+  "wecom.unreadable": "the stored binding is damaged; bind again or sign out",
   "wecom.via": "WeCom smart robot (long connection)"
 }

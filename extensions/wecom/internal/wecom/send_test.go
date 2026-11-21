@@ -74,3 +74,19 @@ func TestPartlySentMessageIsNotSentAgain(t *testing.T) {
 		t.Fatalf("pieces delivered %d after the hub's retry, want 2 (no piece twice)", got)
 	}
 }
+
+// channel.send with no text is not reported as delivered.
+func TestEmptySendIsNotDelivered(t *testing.T) {
+	r := newRig(t)
+	r.pair()
+	p := &program{bot: r.bot}
+	n := len(r.f.Sent())
+	for _, text := range []string{"", "  \n\t "} {
+		if err := r.send(p, "ref-e"+text, text); err == nil {
+			t.Errorf("%q was taken as sent", text)
+		}
+	}
+	if got := len(r.f.Sent()) - n; got != 0 {
+		t.Fatalf("sent %d messages", got)
+	}
+}
